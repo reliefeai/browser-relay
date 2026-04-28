@@ -1,0 +1,42 @@
+{
+  "name": "@linsoai/browser-relay",
+  "version": "1.0.8",
+  "type": "module",
+  "description": "Universal browser relay — control your Chrome from any AI agent via HTTP API or MCP. No auth, no cloud.",
+  "main": "server/relay-server.js",
+  "bin": {
+    "browser-relay": "server/cli.js",
+    "browser-relay-mcp": "server/mcp-server.js"
+  },
+  "files": [
+    "server/",
+    "extension/",
+    "skill/",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node server/relay-server.js",
+    "mcp": "node server/mcp-server.js",
+    "pack:dry-run": "npm pack --dry-run",
+    "sync-version": "node scripts/sync-version.mjs",
+    "prepublishOnly": "node scripts/sync-version.mjs",
+    "postinstall": "node server/install.js",
+    "postuninstall": "node server/uninstall.js 2>/dev/null || true"
+  },
+  "keywords": [
+    "browser",
+    "automation",
+    "cdp",
+    "mcp",
+    "ai-agent",
+    "chrome",
+    "ai-tools"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

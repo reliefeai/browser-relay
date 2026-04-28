@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Browser Relay Options</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 20px; color: #333; }
+    h1 { font-size: 20px; margin-bottom: 8px; }
+    p { color: #666; font-size: 14px; margin-bottom: 24px; }
+    label { display: block; font-weight: 600; font-size: 13px; margin: 16px 0 6px; }
+    input { width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; box-sizing: border-box; }
+    input:focus { outline: none; border-color: #22c55e; }
+    button { background: #22c55e; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-size: 14px; cursor: pointer; margin-top: 24px; }
+    button:hover { background: #16a34a; }
+    .status { margin-top: 16px; padding: 10px; border-radius: 6px; font-size: 13px; display: none; }
+    .status.ok { display: block; background: #dcfce7; color: #166534; }
+    .status.err { display: block; background: #fee2e2; color: #991b1b; }
+    .help { margin-top: 24px; padding: 12px; background: #f8fafc; border-radius: 6px; font-size: 12px; color: #64748b; }
+    code { background: #e2e8f0; padding: 2px 4px; border-radius: 3px; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <h1>Browser Relay</h1>
+  <p>Connect your Chrome browser to any AI agent.</p>
+
+  <label for="relayPort">Relay Server Port</label>
+  <input type="number" id="relayPort" placeholder="18795" min="1" max="65535">
+
+  <button id="save">Save & Test Connection</button>
+  <div id="status" class="status"></div>
+
+  <div class="help">
+    <strong>How it works:</strong><br>
+    1. Install the relay server: <code>npm install -g @linsoai/browser-relay</code><br>
+    2. Check it: <code>browser-relay status</code> (auto-starts on login too)<br>
+    3. Enter the port above (default 18795) and save<br>
+    4. The extension auto-connects and attaches all open tabs
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

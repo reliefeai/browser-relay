@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; width: 320px; margin: 0; padding: 14px 16px; color: #0f172a; background: #fff; }
+    .row { display: flex; align-items: center; gap: 10px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .dot.on { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,0.15); }
+    .dot.off { background: #94a3b8; }
+    .dot.err { background: #ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,0.15); }
+    .dot.connecting { background: #f59e0b; animation: pulse 1.2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .label { font-weight: 600; font-size: 14px; line-height: 1.2; }
+    .meta { font-size: 12px; color: #64748b; margin-top: 3px; }
+    .actions { display: flex; gap: 8px; margin-top: 14px; }
+    button { flex: 1; padding: 8px 10px; font-size: 13px; border: 1px solid #e2e8f0; background: white; border-radius: 6px; cursor: pointer; color: #0f172a; font-family: inherit; }
+    button.primary { background: #22c55e; color: white; border-color: #22c55e; font-weight: 500; }
+    button:hover { filter: brightness(0.97); }
+    button.primary:hover { filter: brightness(0.95); }
+    .install { margin-top: 12px; padding: 10px 12px; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 6px; font-size: 12px; display: none; }
+    .install.show { display: block; }
+    .install-title { font-weight: 600; color: #9a3412; margin-bottom: 8px; font-size: 12px; }
+    code { display: block; padding: 6px 10px; background: #1e293b; color: #f1f5f9; border-radius: 4px; font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11px; margin-bottom: 5px; cursor: pointer; position: relative; user-select: all; }
+    code::after { content: 'copy'; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); font-size: 10px; opacity: 0.5; }
+    code.copied::after { content: 'copied ✓'; opacity: 1; color: #86efac; }
+    .hint { font-size: 11px; color: #78716c; margin-top: 6px; }
+    footer { margin-top: 14px; padding-top: 10px; border-top: 1px solid #e2e8f0; display: flex; justify-content: space-between; font-size: 11px; color: #94a3b8; }
+    footer a { color: #64748b; text-decoration: none; cursor: pointer; }
+    footer a:hover { color: #0f172a; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <div class="dot" id="dot"></div>
+    <div style="flex:1">
+      <div class="label" id="label">Loading…</div>
+      <div class="meta" id="meta"></div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button id="reconnect" class="primary">Reconnect</button>
+    <button id="options">Options</button>
+  </div>
+
+  <div class="install" id="install">
+    <div class="install-title">Relay server not running — install and check it:</div>
+    <code id="cmd1">npm install -g @linsoai/browser-relay</code>
+    <code id="cmd2">browser-relay status</code>
+    <div class="hint">Already installed? Check with <code style="display:inline; padding:1px 5px; cursor:text; font-size:11px">browser-relay status</code></div>
+  </div>
+
+  <footer>
+    <span id="version">—</span>
+    <a id="docs">Docs</a>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>
