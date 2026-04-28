@@ -12,7 +12,8 @@
     "server/",
     "extension/",
     "skill/",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md"
   ],
   "scripts": {
     "start": "node server/relay-server.js",
