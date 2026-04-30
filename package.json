@@ -3,6 +3,10 @@
   "version": "1.0.9",
   "type": "module",
   "description": "Universal browser relay — control your Chrome from any AI agent via HTTP API or MCP. No auth, no cloud.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reliefeai/browser-relay.git"
+  },
   "main": "server/relay-server.js",
   "bin": {
     "browser-relay": "server/cli.js",
