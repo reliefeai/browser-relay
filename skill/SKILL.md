@@ -1,11 +1,11 @@
 ---
 name: browser-relay
-description: Control the user's local Chrome browser through the Browser Relay HTTP API or MCP. Use for scraping dynamic/JS-rendered pages, interacting with login-protected sites (Twitter, Gmail, Notion, etc.), clicking, typing, scrolling, screenshots, or evaluating JS in tabs that carry the user's real session and cookies. Skip for static pages (WebFetch is cheaper) or pure REST APIs.
+description: Control the user's local Chrome browser through Browser Relay. For agent browser interaction, use the `browser-relay` CLI by default; use HTTP API mainly when writing code, tests, or integrations. Use for dynamic/login-protected pages, clicking, typing, screenshots, or evaluating JS in tabs that carry the user's real session. Skip static pages and pure REST APIs.
 ---
 
 # Browser Relay Skill
 
-Control a real Chrome browser via an HTTP API or MCP. The browser runs on the user's machine, carrying their login state, cookies, and extensions.
+Control a real Chrome browser via the Browser Relay CLI, HTTP API, or MCP. The browser runs on the user's machine, carrying their login state, cookies, and extensions.
 
 ## When to Use
 
@@ -36,7 +36,38 @@ WebSocket:  ws://127.0.0.1:18795/extension
 
 No authentication needed — the relay only accepts connections from localhost.
 
-## Available Tools
+## Preferred CLI Workflow
+
+When shell access is available, use the `browser-relay` CLI for browser
+interaction. Do not hand-write `curl` for normal agent browsing tasks. The CLI
+avoids JSON escaping, keeps commands short, and prints compact output by
+default.
+
+Use the HTTP API directly only when you are writing code, tests, scripts, or an
+integration against Browser Relay, or when the CLI is unavailable. Use `--json`
+only when you need the full API response.
+
+```bash
+browser-relay tabs
+browser-relay snapshot --tab <tabId> --max-length 20000
+browser-relay click 'button[type=submit]' --tab <tabId>
+browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --tab <tabId>
+browser-relay scroll down --amount 1000 --tab <tabId>
+browser-relay screenshot /tmp/page.png --full-page --tab <tabId>
+browser-relay eval 'document.title' --tab <tabId>
+```
+
+For long text or JavaScript, avoid shell escaping with stdin:
+
+```bash
+printf '%s' "$TEXT" | browser-relay type --selector textarea --stdin --tab <tabId>
+browser-relay eval --stdin --tab <tabId> < script.js
+```
+
+## HTTP API Reference
+
+The HTTP API below is for code, tests, custom tools, and low-level debugging.
+For interactive agent work, prefer the CLI workflow above.
 
 ### 1. browser_tabs
 List all attached browser tabs.
@@ -112,36 +143,34 @@ Body: { "selector": "img.profile-pic", "tabId?": "..." }
 
 When asked to do something with a web page:
 
-1. **`browser_tabs` first** — discover available tabs and their URLs
-2. **`browser_navigate`** if needed — go to the target page
-3. **`browser_snapshot`** — understand the page structure
+1. **`browser-relay tabs` first** — discover available tabs and their URLs
+2. **`browser-relay navigate`** if needed — go to the target page
+3. **`browser-relay snapshot`** — understand the page structure
 4. **Plan actions** based on snapshot (click what, type where)
-5. **Execute** (`browser_click`, `browser_type`, `browser_scroll`) one at a time
+5. **Execute** (`browser-relay click`, `browser-relay type`, `browser-relay scroll`) one at a time
 6. **Re-snapshot** after each action to verify state
 7. **Screenshot** if visual confirmation is needed
 
 ## Example Session
 
-```http
+```bash
 # 1. List tabs
-GET /api/tabs
-→ { "tabs": [{ "id": "ABC123", "title": "Google", "url": "https://google.com" }] }
+browser-relay tabs
+# ABC123    Google    https://google.com
 
 # 2. Take snapshot to see the page
-GET /api/snapshot?tabId=ABC123
-→ "[input type=text name=q placeholder=Search Google]\n[button 'Google Search']\n..."
+browser-relay snapshot --tab ABC123
+# [input type=text name=q placeholder="Search Google"]
+# [button "Google Search"]
 
 # 3. Type into the search box
-POST /api/type
-{ "tabId": "ABC123", "selector": "input[name='q']", "text": browser relay, "submit": true }
+browser-relay type 'browser relay' --selector 'input[name=q]' --submit --tab ABC123
 
 # 4. New snapshot after navigation
-GET /api/snapshot?tabId=ABC123
-→ Shows search results
+browser-relay snapshot --tab ABC123
 
 # 5. Click a result
-POST /api/click
-{ "tabId": "ABC123", "selector": "a[href*='github.com']" }
+browser-relay click 'a[href*="github.com"]' --tab ABC123
 ```
 
 ## MCP Registration (Claude Desktop / Cursor / Windsurf)

@@ -325,8 +325,9 @@ async function handleType(req, res) {
 async function handleScreenshot(req, res) {
   await ensureExtension();
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-  const tabId = url.searchParams.get("tabId") || undefined;
-  const fullPage = url.searchParams.get("fullPage") === "true";
+  const body = req.method === "POST" ? await readBody(req) : {};
+  const tabId = body.tabId || url.searchParams.get("tabId") || undefined;
+  const fullPage = body.fullPage === true || url.searchParams.get("fullPage") === "true";
   const sessionId = resolveTab(tabId);
   const result = await sendToExtension("Page.captureScreenshot", { format: "png", captureBeyondViewport: fullPage }, sessionId);
   jsonResponse(res, 200, { ok: true, data: result?.data || "", format: "png" });

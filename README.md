@@ -150,7 +150,37 @@ After installing the npm package, use `browser-relay-mcp` directly:
 }
 ```
 
+## Browser CLI
+
+For agents that can run shell commands, the CLI is usually faster and less error-prone than hand-writing `curl` JSON:
+
+```bash
+browser-relay tabs
+browser-relay snapshot --tab ABC123 --max-length 20000
+browser-relay click 'button[type=submit]' --tab ABC123
+browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+browser-relay scroll down --amount 1000
+browser-relay screenshot /tmp/page.png --full-page
+browser-relay eval 'document.title'
+```
+
+For long text or JavaScript, avoid shell escaping by reading from stdin:
+
+```bash
+printf 'hello\nworld' | browser-relay type --selector textarea --stdin
+browser-relay eval --stdin < script.js
+```
+
+All browser commands accept `--json` for the raw API response and `--tab <id>` to target a specific tab.
+
+Agent guidance: prefer the CLI for browser interaction. Use the HTTP API when
+you are writing code, tests, or an integration against Browser Relay, or when a
+CLI is not available in the environment.
+
 ## HTTP API
+
+The HTTP API is the stable integration surface for code and custom tools. For
+interactive agent work, prefer the CLI above.
 
 ```bash
 # List attached tabs
@@ -192,6 +222,14 @@ browser-relay path       # Print the Chrome extension directory
 browser-relay skill      # Print the Skill install command
 browser-relay install    # Register the background service
 browser-relay uninstall  # Unregister the background service
+
+browser-relay tabs       # List attached browser tabs
+browser-relay snapshot   # Print annotated page text
+browser-relay click      # Click an element by CSS selector
+browser-relay type       # Type text into the page
+browser-relay screenshot # Save a PNG screenshot
+browser-relay eval       # Evaluate JavaScript in the page
+browser-relay api-help   # Show browser command examples
 ```
 
 Service files:
@@ -212,6 +250,7 @@ Logs:
 
 | Environment variable | Default | Description |
 | --- | --- | --- |
+| `BROWSER_RELAY_URL` | `http://127.0.0.1:18795` | Relay base URL used by CLI browser commands and MCP |
 | `BROWSER_RELAY_HOST` | `127.0.0.1` | HTTP and WebSocket bind address |
 | `BROWSER_RELAY_PORT` | `18795` | HTTP and WebSocket port |
 

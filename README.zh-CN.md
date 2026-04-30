@@ -136,7 +136,35 @@ Browser Relay 不是只给底层自动化脚本使用的，它也专门面向 Ag
 }
 ```
 
+## 浏览器 CLI
+
+如果 Agent 能执行 shell 命令，优先用 CLI，通常比手写 `curl` JSON 更快，也少很多转义：
+
+```bash
+browser-relay tabs
+browser-relay snapshot --tab ABC123 --max-length 20000
+browser-relay click 'button[type=submit]' --tab ABC123
+browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+browser-relay scroll down --amount 1000
+browser-relay screenshot /tmp/page.png --full-page
+browser-relay eval 'document.title'
+```
+
+长文本或多行 JavaScript 可以从 stdin 读取，避免 shell 转义：
+
+```bash
+printf 'hello\nworld' | browser-relay type --selector textarea --stdin
+browser-relay eval --stdin < script.js
+```
+
+所有浏览器操作命令都支持 `--json` 输出原始 API 响应，也支持 `--tab <id>` 指定标签页。
+
+Agent 使用规则：浏览器交互默认使用 CLI。只有在编写代码、测试、集成
+Browser Relay，或者当前环境没有 CLI 时，才直接使用 HTTP API。
+
 ## HTTP API 示例
+
+HTTP API 是给代码和自定义工具集成用的稳定接口。交互式 Agent 操作优先使用上面的 CLI。
 
 ```bash
 curl http://127.0.0.1:18795/api/tabs
@@ -177,12 +205,21 @@ browser-relay path       # 输出 Chrome 扩展目录
 browser-relay skill      # 输出 Skill 安装命令
 browser-relay install    # 注册后台服务
 browser-relay uninstall  # 卸载后台服务
+
+browser-relay tabs       # 列出已附加标签页
+browser-relay snapshot   # 输出页面结构化文本
+browser-relay click      # 按 CSS selector 点击元素
+browser-relay type       # 输入文本
+browser-relay screenshot # 保存 PNG 截图
+browser-relay eval       # 在页面内执行 JavaScript
+browser-relay api-help   # 查看浏览器操作命令示例
 ```
 
 ## 配置
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
+| `BROWSER_RELAY_URL` | `http://127.0.0.1:18795` | CLI 浏览器操作命令和 MCP 使用的 relay 地址 |
 | `BROWSER_RELAY_HOST` | `127.0.0.1` | HTTP 和 WebSocket 监听地址 |
 | `BROWSER_RELAY_PORT` | `18795` | HTTP 和 WebSocket 端口 |
 
