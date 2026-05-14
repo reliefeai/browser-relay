@@ -32,6 +32,10 @@ async function relayRequest(method, path, body) {
 async function relayGet(path) { return relayRequest("GET", path); }
 async function relayPost(path, body) { return relayRequest("POST", path, body); }
 
+function addQueryParam(params, name, value) {
+  if (value !== undefined && value !== null && value !== "") params.set(name, String(value));
+}
+
 // ---------------------------------------------------------------------------
 // Tool definitions
 // ---------------------------------------------------------------------------
@@ -56,21 +60,39 @@ const TOOLS = [
     handler: async (args) => relayPost("/api/navigate", args),
   },
   {
+    name: "browser_frames",
+    description: "List the frame tree for a browser tab. Use this before interacting with iframes; pass the returned frameId to snapshot, click, type, scroll, eval, wait, or download.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string", description: "Tab targetId (optional)" },
+      },
+    },
+    handler: async (args) => {
+      const params = new URLSearchParams();
+      addQueryParam(params, "tabId", args.tabId);
+      const qs = params.toString();
+      return relayGet(`/api/frames${qs ? "?" + qs : ""}`);
+    },
+  },
+  {
     name: "browser_snapshot",
     description: "Get a text representation of the page. Returns annotated text with clickable elements (links, buttons, inputs) marked for easy reference. Use this to understand what is on the page before interacting.",
     inputSchema: {
       type: "object",
       properties: {
         tabId: { type: "string", description: "Tab targetId (optional)" },
+        frameId: { type: "string", description: "Frame id from browser_frames (optional)" },
         format: { type: "string", enum: ["text", "html"], description: "Output format (default: text)" },
         maxLength: { type: "number", description: "Max output length (default: 100000)" },
       },
     },
     handler: async (args) => {
       const params = new URLSearchParams();
-      if (args.tabId) params.set("tabId", args.tabId);
-      if (args.format) params.set("format", args.format);
-      if (args.maxLength) params.set("maxLength", String(args.maxLength));
+      addQueryParam(params, "tabId", args.tabId);
+      addQueryParam(params, "frameId", args.frameId);
+      addQueryParam(params, "format", args.format);
+      addQueryParam(params, "maxLength", args.maxLength);
       const qs = params.toString();
       return relayGet(`/api/snapshot${qs ? "?" + qs : ""}`);
     },
@@ -83,6 +105,8 @@ const TOOLS = [
       properties: {
         selector: { type: "string", description: "CSS selector for the element to click (e.g. 'button.submit', 'a[href=\"...\"]')" },
         tabId: { type: "string", description: "Tab targetId (optional)" },
+        frameId: { type: "string", description: "Frame id from browser_frames (optional)" },
+        button: { type: "string", enum: ["left", "middle", "right"], description: "Mouse button (default: left)" },
         doubleClick: { type: "boolean", description: "Double-click instead of single click" },
       },
       required: ["selector"],
@@ -100,6 +124,7 @@ const TOOLS = [
         submit: { type: "boolean", description: "Press Enter after typing" },
         clear: { type: "boolean", description: "Clear the field before typing" },
         tabId: { type: "string", description: "Tab targetId (optional)" },
+        frameId: { type: "string", description: "Frame id from browser_frames (optional)" },
       },
       required: ["text"],
     },
@@ -114,6 +139,7 @@ const TOOLS = [
         direction: { type: "string", enum: ["up", "down", "top", "bottom"], description: "Scroll direction" },
         amount: { type: "number", description: "Pixels to scroll (default: 800)" },
         tabId: { type: "string", description: "Tab targetId (optional)" },
+        frameId: { type: "string", description: "Frame id from browser_frames (optional)" },
       },
       required: ["direction"],
     },
@@ -139,10 +165,46 @@ const TOOLS = [
       properties: {
         expression: { type: "string", description: "JavaScript expression to evaluate" },
         tabId: { type: "string", description: "Tab targetId (optional)" },
+        frameId: { type: "string", description: "Frame id from browser_frames (optional)" },
       },
       required: ["expression"],
     },
     handler: async (args) => relayPost("/api/eval", args),
+  },
+  {
+    name: "browser_wait",
+    description: "Wait for a selector, text, URL substring/regex, or JavaScript expression to become true. Supports frameId for iframe waits.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector to wait for" },
+        visible: { type: "boolean", description: "Require selector to be visible" },
+        text: { type: "string", description: "Text that must appear in document body" },
+        url: { type: "string", description: "URL substring that must appear in location.href" },
+        urlRegex: { type: "string", description: "Regular expression that must match location.href" },
+        expression: { type: "string", description: "JavaScript expression that must evaluate truthy" },
+        timeoutMs: { type: "number", description: "Timeout in milliseconds (default: 10000, max: 120000)" },
+        pollMs: { type: "number", description: "Polling interval in milliseconds (default: 250)" },
+        tabId: { type: "string", description: "Tab targetId (optional)" },
+        frameId: { type: "string", description: "Frame id from browser_frames (optional)" },
+      },
+    },
+    handler: async (args) => relayPost("/api/wait", args),
+  },
+  {
+    name: "browser_cdp",
+    description: "Advanced escape hatch: send a raw Chrome DevTools Protocol command to the attached tab. Use only when high-level tools are insufficient.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        method: { type: "string", description: "CDP method, e.g. Runtime.evaluate" },
+        params: { type: "object", description: "CDP params object" },
+        tabId: { type: "string", description: "Tab targetId (optional)" },
+        sessionId: { type: "string", description: "Raw debugger session id (optional)" },
+      },
+      required: ["method"],
+    },
+    handler: async (args) => relayPost("/api/cdp", args),
   },
   {
     name: "browser_download",
@@ -152,6 +214,7 @@ const TOOLS = [
       properties: {
         selector: { type: "string", description: "CSS selector to find the element (e.g. 'img', 'a.download-link')" },
         tabId: { type: "string", description: "Tab targetId (optional)" },
+        frameId: { type: "string", description: "Frame id from browser_frames (optional)" },
       },
       required: ["selector"],
     },

@@ -142,12 +142,16 @@ Browser Relay 不是只给底层自动化脚本使用的，它也专门面向 Ag
 
 ```bash
 browser-relay tabs
+browser-relay frames --tab ABC123
 browser-relay snapshot --tab ABC123 --max-length 20000
+browser-relay snapshot --tab ABC123 --frame FRAME123
 browser-relay click 'button[type=submit]' --tab ABC123
-browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --frame FRAME123
+browser-relay wait --selector '#done' --visible --timeout 10000
 browser-relay scroll down --amount 1000
 browser-relay screenshot /tmp/page.png --full-page
 browser-relay eval 'document.title'
+browser-relay cdp Runtime.evaluate --params '{"expression":"document.title","returnByValue":true}'
 ```
 
 长文本或多行 JavaScript 可以从 stdin 读取，避免 shell 转义：
@@ -169,11 +173,17 @@ HTTP API 是给代码和自定义工具集成用的稳定接口。交互式 Agen
 ```bash
 curl http://127.0.0.1:18795/api/tabs
 
+curl "http://127.0.0.1:18795/api/frames?tabId=ABC123"
+
 curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123"
 
 curl -X POST http://127.0.0.1:18795/api/click \
   -H "Content-Type: application/json" \
-  -d '{"tabId":"ABC123","selector":"button.submit"}'
+  -d '{"tabId":"ABC123","frameId":"FRAME123","selector":"button.submit"}'
+
+curl -X POST http://127.0.0.1:18795/api/wait \
+  -H "Content-Type: application/json" \
+  -d '{"tabId":"ABC123","selector":"#done","visible":true}'
 ```
 
 常用接口：
@@ -184,12 +194,15 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/debug` | GET | 服务状态和诊断信息 |
 | `/api/tabs` | GET | 列出已附加标签页 |
 | `/api/navigate` | POST | 导航已附加标签页 |
+| `/api/frames` | GET | 列出标签页 frame tree |
 | `/api/snapshot` | GET | 获取页面文本快照或 HTML |
 | `/api/click` | POST | 按 CSS selector 点击元素 |
 | `/api/type` | POST | 输入文本 |
 | `/api/scroll` | POST | 滚动页面 |
 | `/api/screenshot` | GET/POST | 获取 PNG 截图 |
 | `/api/eval` | POST | 执行页面内 JavaScript |
+| `/api/wait` | POST | 等待 selector、文本、URL 或表达式 |
+| `/api/cdp` | POST | 从 loopback 客户端发送原始 CDP 命令 |
 | `/api/download` | POST | 获取元素 URL |
 
 ## CLI
@@ -207,11 +220,15 @@ browser-relay install    # 注册后台服务
 browser-relay uninstall  # 卸载后台服务
 
 browser-relay tabs       # 列出已附加标签页
+browser-relay frames     # 列出标签页 frames
 browser-relay snapshot   # 输出页面结构化文本
 browser-relay click      # 按 CSS selector 点击元素
 browser-relay type       # 输入文本
+browser-relay scroll     # 滚动页面
 browser-relay screenshot # 保存 PNG 截图
 browser-relay eval       # 在页面内执行 JavaScript
+browser-relay wait       # 等待页面状态
+browser-relay cdp        # 发送原始 CDP 命令
 browser-relay api-help   # 查看浏览器操作命令示例
 ```
 

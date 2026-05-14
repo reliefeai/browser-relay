@@ -132,6 +132,8 @@ Browser Relay is designed to be comfortable for agents, not just low-level autom
 - The HTTP API is simple enough for any custom agent or script.
 - Page snapshots are annotated with links, buttons, inputs, and other interactive elements so agents can plan before acting.
 - Actions target existing attached tabs, keeping the user's browser context visible and predictable.
+- Iframe-aware commands can list frames and target a specific `frameId`.
+- `wait` and controlled raw CDP passthrough cover advanced cases without making Browser Relay a full Playwright replacement.
 
 ## MCP
 
@@ -156,12 +158,16 @@ For agents that can run shell commands, the CLI is usually faster and less error
 
 ```bash
 browser-relay tabs
+browser-relay frames --tab ABC123
 browser-relay snapshot --tab ABC123 --max-length 20000
+browser-relay snapshot --tab ABC123 --frame FRAME123
 browser-relay click 'button[type=submit]' --tab ABC123
-browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --frame FRAME123
+browser-relay wait --selector '#done' --visible --timeout 10000
 browser-relay scroll down --amount 1000
 browser-relay screenshot /tmp/page.png --full-page
 browser-relay eval 'document.title'
+browser-relay cdp Runtime.evaluate --params '{"expression":"document.title","returnByValue":true}'
 ```
 
 For long text or JavaScript, avoid shell escaping by reading from stdin:
@@ -171,7 +177,7 @@ printf 'hello\nworld' | browser-relay type --selector textarea --stdin
 browser-relay eval --stdin < script.js
 ```
 
-All browser commands accept `--json` for the raw API response and `--tab <id>` to target a specific tab.
+All browser commands accept `--json` for the raw API response and `--tab <id>` to target a specific tab. `snapshot`, `click`, `type`, `scroll`, `eval`, `wait`, and `download` also accept `--frame <id>` from `browser-relay frames`.
 
 Agent guidance: prefer the CLI for browser interaction. Use the HTTP API when
 you are writing code, tests, or an integration against Browser Relay, or when a
@@ -189,10 +195,19 @@ curl http://127.0.0.1:18795/api/tabs
 # Take a text snapshot of a page
 curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123"
 
+# List frames and snapshot an iframe
+curl "http://127.0.0.1:18795/api/frames?tabId=ABC123"
+curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123&frameId=FRAME123"
+
 # Click an element
 curl -X POST http://127.0.0.1:18795/api/click \
   -H "Content-Type: application/json" \
-  -d '{"tabId":"ABC123","selector":"button.submit"}'
+  -d '{"tabId":"ABC123","frameId":"FRAME123","selector":"button.submit"}'
+
+# Wait for a selector
+curl -X POST http://127.0.0.1:18795/api/wait \
+  -H "Content-Type: application/json" \
+  -d '{"tabId":"ABC123","selector":"#done","visible":true}'
 ```
 
 | Endpoint | Method | Description |
@@ -201,12 +216,15 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/debug` | GET | Server diagnostics |
 | `/api/tabs` | GET | List attached tabs |
 | `/api/navigate` | POST | Navigate an attached tab |
+| `/api/frames` | GET | List frame tree for a tab |
 | `/api/snapshot` | GET | Get annotated text or raw HTML |
 | `/api/click` | POST | Click an element by CSS selector |
 | `/api/type` | POST | Type into an input |
 | `/api/scroll` | POST | Scroll the page |
 | `/api/screenshot` | GET/POST | Capture a PNG screenshot |
 | `/api/eval` | POST | Evaluate JavaScript in the page |
+| `/api/wait` | POST | Wait for selector, text, URL, or expression |
+| `/api/cdp` | POST | Send a raw CDP command from loopback clients |
 | `/api/download` | POST | Extract an element URL |
 
 ## CLI
@@ -224,11 +242,15 @@ browser-relay install    # Register the background service
 browser-relay uninstall  # Unregister the background service
 
 browser-relay tabs       # List attached browser tabs
+browser-relay frames     # List frames in a tab
 browser-relay snapshot   # Print annotated page text
 browser-relay click      # Click an element by CSS selector
 browser-relay type       # Type text into the page
+browser-relay scroll     # Scroll the page
 browser-relay screenshot # Save a PNG screenshot
 browser-relay eval       # Evaluate JavaScript in the page
+browser-relay wait       # Wait for page state
+browser-relay cdp        # Send a raw CDP command
 browser-relay api-help   # Show browser command examples
 ```
 
@@ -279,6 +301,7 @@ npm run pack:dry-run
 - The relay binds to `127.0.0.1` by default. Do not expose it to the public internet.
 - If you change the bind address, add your own authentication and network isolation.
 - Browser Relay gives agents access to the same browser state you have, so treat enabled agents as trusted local software.
+- `/api/cdp` is intentionally an advanced local escape hatch and is restricted to loopback clients.
 
 ## License
 

@@ -49,12 +49,16 @@ only when you need the full API response.
 
 ```bash
 browser-relay tabs
+browser-relay frames --tab <tabId>
 browser-relay snapshot --tab <tabId> --max-length 20000
+browser-relay snapshot --tab <tabId> --frame <frameId>
 browser-relay click 'button[type=submit]' --tab <tabId>
-browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --tab <tabId>
+browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --tab <tabId> --frame <frameId>
+browser-relay wait --selector '#done' --visible --timeout 10000 --tab <tabId>
 browser-relay scroll down --amount 1000 --tab <tabId>
 browser-relay screenshot /tmp/page.png --full-page --tab <tabId>
 browser-relay eval 'document.title' --tab <tabId>
+browser-relay cdp Runtime.evaluate --params '{"expression":"document.title","returnByValue":true}' --tab <tabId>
 ```
 
 For long text or JavaScript, avoid shell escaping with stdin:
@@ -90,6 +94,14 @@ Get a text representation of the current page (interactive elements annotated).
 GET http://127.0.0.1:18795/api/snapshot?tabId=<id>&format=text&maxLength=100000
 ```
 Format can be `"text"` (annotated DOM) or `"html"` (raw HTML).
+Pass `frameId=<frameId>` to snapshot an iframe. Get frame ids from `/api/frames`.
+
+### 3b. browser_frames
+List a tab's frame tree.
+```
+GET http://127.0.0.1:18795/api/frames?tabId=<id>
+```
+Returns: `{ ok: true, frames: [{ id, parentId, name, url, depth }] }`
 
 ### 4. browser_click
 Click an element by CSS selector. Scrolls into view first, uses real mouse events.
@@ -97,6 +109,7 @@ Click an element by CSS selector. Scrolls into view first, uses real mouse event
 POST http://127.0.0.1:18795/api/click
 Body: { "selector": "button.submit", "tabId?": "...", "doubleClick?": false }
 ```
+Pass `"frameId"` to click inside an iframe.
 
 ### 5. browser_type
 Type text into an input field. Optionally clear and submit.
@@ -110,6 +123,7 @@ Body: {
   "tabId?": "..."
 }
 ```
+Pass `"frameId"` to type inside an iframe. `clear: true` uses DOM value setters before typing, which is more reliable than only sending Ctrl+A/Backspace.
 
 ### 6. browser_scroll
 Scroll the page.
@@ -117,6 +131,7 @@ Scroll the page.
 POST http://127.0.0.1:18795/api/scroll
 Body: { "direction": "down|up|top|bottom", "amount?": 800, "tabId?": "..." }
 ```
+Pass `"frameId"` to scroll an iframe.
 
 ### 7. browser_screenshot
 Capture a PNG screenshot (base64).
@@ -131,6 +146,7 @@ Evaluate arbitrary JavaScript in the page. The escape hatch.
 POST http://127.0.0.1:18795/api/eval
 Body: { "expression": "document.querySelector('h1').innerText", "tabId?": "..." }
 ```
+Pass `"frameId"` to evaluate in an iframe.
 
 ### 9. browser_download
 Get the URL of an image/media/link element.
@@ -138,18 +154,47 @@ Get the URL of an image/media/link element.
 POST http://127.0.0.1:18795/api/download
 Body: { "selector": "img.profile-pic", "tabId?": "..." }
 ```
+Pass `"frameId"` to query inside an iframe.
+
+### 10. browser_wait
+Wait for page state.
+```
+POST http://127.0.0.1:18795/api/wait
+Body: {
+  "selector?": "#done",
+  "visible?": true,
+  "text?": "Saved",
+  "url?": "/dashboard",
+  "urlRegex?": "dashboard$",
+  "expression?": "window.appReady === true",
+  "timeoutMs?": 10000,
+  "pollMs?": 250,
+  "tabId?": "...",
+  "frameId?": "..."
+}
+```
+
+### 11. browser_cdp
+Advanced local escape hatch for Chrome DevTools Protocol commands.
+```
+POST http://127.0.0.1:18795/api/cdp
+Body: { "method": "Runtime.evaluate", "params?": {}, "tabId?": "...", "sessionId?": "..." }
+```
+Use this only when high-level commands are insufficient.
 
 ## Agent Decision Workflow
 
 When asked to do something with a web page:
 
 1. **`browser-relay tabs` first** — discover available tabs and their URLs
-2. **`browser-relay navigate`** if needed — go to the target page
-3. **`browser-relay snapshot`** — understand the page structure
-4. **Plan actions** based on snapshot (click what, type where)
-5. **Execute** (`browser-relay click`, `browser-relay type`, `browser-relay scroll`) one at a time
-6. **Re-snapshot** after each action to verify state
-7. **Screenshot** if visual confirmation is needed
+2. **`browser-relay frames`** when the target is inside an iframe
+3. **`browser-relay navigate`** if needed — go to the target page
+4. **`browser-relay snapshot`** — understand the page structure
+5. **Plan actions** based on snapshot (click what, type where)
+6. **Execute** (`browser-relay click`, `browser-relay type`, `browser-relay scroll`) one at a time
+7. **`browser-relay wait`** after actions that trigger async UI changes
+8. **Re-snapshot** after each action to verify state
+9. **Screenshot** if visual confirmation is needed
 
 ## Example Session
 

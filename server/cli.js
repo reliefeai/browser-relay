@@ -171,12 +171,15 @@ Commands:
 
 Browser commands:
   tabs        List attached Chrome tabs
+  frames      List frames in a tab
   snapshot    Print annotated page text
   click       Click an element by CSS selector
   type        Type text into an input or focused element
   scroll      Scroll the page
   screenshot  Save a PNG screenshot
   eval        Evaluate JavaScript in the page
+  wait        Wait for selector/text/url/expression
+  cdp         Send a raw CDP command to a tab
   api-help    Show browser command examples
 
   --help,-h   Show this help
@@ -293,8 +296,26 @@ function tabIdFrom(flags) {
   return flagValue(flags, "tab", "tab-id", "tabId");
 }
 
+function frameIdFrom(flags) {
+  return flagValue(flags, "frame", "frame-id", "frameId");
+}
+
 function addParam(params, name, value) {
   if (value !== undefined && value !== null && value !== "") params.set(name, String(value));
+}
+
+function parseJsonOption(value, label) {
+  if (value === undefined || value === null || value === "") return {};
+  try {
+    const parsed = JSON.parse(String(value).replace(/^\uFEFF/, "").trim());
+    if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
+      throw new Error(`${label} must be a JSON object`);
+    }
+    return parsed;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Invalid ${label}: ${detail}`);
+  }
 }
 
 async function relayRequest(method, path, body) {
@@ -342,6 +363,20 @@ function printTabs(data, json) {
   }
 }
 
+function printFrames(data, json) {
+  if (json) return printData(data, true);
+  const frames = data?.frames || [];
+  if (!frames.length) {
+    console.log("No frames.");
+    return;
+  }
+  for (const frame of frames) {
+    const indent = "  ".repeat(frame.depth || 0);
+    const name = frame.name ? ` name=${frame.name}` : "";
+    console.log(`${indent}${frame.id}${name}\t${frame.url || ""}`);
+  }
+}
+
 function ensureOk(data) {
   if (data?.ok === false) throw new Error(data.error || "Command failed");
 }
@@ -358,6 +393,12 @@ async function browserApiCommand(cmd, args) {
     case "list": {
       return printTabs(await relayRequest("GET", "/api/tabs"), json);
     }
+    case "frames": {
+      const params = new URLSearchParams();
+      addParam(params, "tabId", tabIdFrom(flags));
+      const qs = params.toString();
+      return printFrames(await relayRequest("GET", `/api/frames${qs ? `?${qs}` : ""}`), json);
+    }
     case "navigate":
     case "go":
     case "open": {
@@ -371,6 +412,7 @@ async function browserApiCommand(cmd, args) {
     case "snapshot": {
       const params = new URLSearchParams();
       addParam(params, "tabId", tabIdFrom(flags));
+      addParam(params, "frameId", frameIdFrom(flags));
       addParam(params, "format", flagValue(flags, "format") || "text");
       addParam(params, "maxLength", flagValue(flags, "max-length", "maxLength"));
       const qs = params.toString();
@@ -385,6 +427,7 @@ async function browserApiCommand(cmd, args) {
       const data = await relayRequest("POST", "/api/click", {
         selector,
         tabId: tabIdFrom(flags),
+        frameId: frameIdFrom(flags),
         doubleClick: flagBool(flags, "double", "double-click", "doubleClick"),
         button: flagValue(flags, "button"),
       });
@@ -399,6 +442,7 @@ async function browserApiCommand(cmd, args) {
         text,
         selector: flagValue(flags, "selector"),
         tabId: tabIdFrom(flags),
+        frameId: frameIdFrom(flags),
         clear: flagBool(flags, "clear"),
         submit: flagBool(flags, "submit"),
       });
@@ -414,6 +458,7 @@ async function browserApiCommand(cmd, args) {
         direction,
         amount: amount === undefined ? undefined : Number(amount),
         tabId: tabIdFrom(flags),
+        frameId: frameIdFrom(flags),
       });
       ensureOk(data);
       if (json) return printData(data, true);
@@ -444,7 +489,7 @@ async function browserApiCommand(cmd, args) {
     }
     case "eval": {
       const expression = readInput(flags, positional, "expression", "expression");
-      const data = await relayRequest("POST", "/api/eval", { expression, tabId: tabIdFrom(flags) });
+      const data = await relayRequest("POST", "/api/eval", { expression, tabId: tabIdFrom(flags), frameId: frameIdFrom(flags) });
       ensureOk(data);
       if (json) return printData(data, true);
       if (data.exceptionDetails) {
@@ -462,12 +507,45 @@ async function browserApiCommand(cmd, args) {
     }
     case "download": {
       const selector = requireValue(flagValue(flags, "selector") || positional.join(" "), "selector is required");
-      const data = await relayRequest("POST", "/api/download", { selector, tabId: tabIdFrom(flags) });
+      const data = await relayRequest("POST", "/api/download", { selector, tabId: tabIdFrom(flags), frameId: frameIdFrom(flags) });
       ensureOk(data);
       if (json) return printData(data, true);
       if (!data.found) throw new Error(`Element not found: ${selector}`);
       console.log(data.url || "");
       return;
+    }
+    case "wait": {
+      const selector = flagValue(flags, "selector") || positional[0];
+      const data = await relayRequest("POST", "/api/wait", {
+        selector,
+        text: flagValue(flags, "text"),
+        url: flagValue(flags, "url"),
+        urlRegex: flagValue(flags, "url-regex", "urlRegex"),
+        expression: flagValue(flags, "expression"),
+        visible: flagBool(flags, "visible"),
+        timeoutMs: flagValue(flags, "timeout", "timeout-ms", "timeoutMs"),
+        pollMs: flagValue(flags, "poll", "poll-ms", "pollMs"),
+        tabId: tabIdFrom(flags),
+        frameId: frameIdFrom(flags),
+      });
+      ensureOk(data);
+      if (json) return printData(data, true);
+      console.log(`Matched in ${data.elapsedMs}ms.`);
+      return;
+    }
+    case "cdp": {
+      const method = requireValue(flagValue(flags, "method") || positional[0], "CDP method is required");
+      const paramsText = flagBool(flags, "stdin")
+        ? readFileSync(0, "utf-8")
+        : flagValue(flags, "params");
+      const data = await relayRequest("POST", "/api/cdp", {
+        method,
+        params: parseJsonOption(paramsText, "params"),
+        tabId: tabIdFrom(flags),
+        sessionId: flagValue(flags, "session", "session-id", "sessionId"),
+      });
+      ensureOk(data);
+      return printData(data, true);
     }
     default:
       throw new Error(`Unknown command: ${cmd}`);
@@ -479,6 +557,7 @@ function apiHelp() {
   tabs                         List attached Chrome tabs
   debug                        Show relay diagnostics
   navigate <url> [--tab id]    Navigate an attached tab
+  frames [--tab id]            List frame ids for a tab
   snapshot [--tab id]          Print annotated page text
   click <selector>             Click a CSS selector
   type <text>                  Type text into the focused element
@@ -486,18 +565,25 @@ function apiHelp() {
   screenshot <file.png>        Save a PNG screenshot
   eval <js>                    Evaluate JavaScript in the page
   download <selector>          Print src/href for an element
+  wait [--selector css]        Wait for selector/text/url/expression
+  cdp <method> --params '{}'   Send a raw CDP command
 
 Common flags:
   --tab, -t <id>               Target tab id from 'browser-relay tabs'
+  --frame <id>                 Target frame id from 'browser-relay frames'
   --json, -j                   Print JSON response
   --selector, -s <css>         Selector for click/type/download
   --stdin                      Read text/expression from stdin
 
 Examples:
   browser-relay tabs
+  browser-relay frames --tab ABC123
   browser-relay snapshot --tab ABC123 --max-length 20000
+  browser-relay snapshot --tab ABC123 --frame FRAME123
   browser-relay click 'button[type=submit]'
   browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+  browser-relay wait --selector '#done' --visible --timeout 10000
+  browser-relay cdp Runtime.evaluate --params '{"expression":"document.title","returnByValue":true}'
   browser-relay screenshot /tmp/page.png --full-page
   browser-relay eval --stdin < script.js
 `);
@@ -523,6 +609,7 @@ switch (cmd) {
   case "tabs":
   case "list":
   case "debug":
+  case "frames":
   case "navigate":
   case "go":
   case "open":
@@ -533,6 +620,8 @@ switch (cmd) {
   case "screenshot":
   case "eval":
   case "download":
+  case "wait":
+  case "cdp":
     try { await browserApiCommand(cmd, process.argv.slice(3)); }
     catch (err) { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); }
     break;

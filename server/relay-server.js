@@ -17,6 +17,9 @@ const PING_INTERVAL_MS = 5_000;
 const COMMAND_TIMEOUT_MS = 30_000;
 const EXTENSION_GRACE_MS = 20_000;
 const MAX_BODY_SIZE = 64 * 1024; // 64KB
+const DEFAULT_WAIT_TIMEOUT_MS = 10_000;
+const DEFAULT_WAIT_POLL_MS = 250;
+const MAX_WAIT_TIMEOUT_MS = 120_000;
 
 const serverStartTime = Date.now();
 
@@ -187,6 +190,137 @@ async function ensureExtension() {
   if (!reconnected || !extensionConnected()) { throw new Error("Extension not connected. Is the browser running with the extension?"); }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function boundedNumber(value, fallback, min, max) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function flattenFrameTree(node, depth = 0, parentId = null, out = []) {
+  if (!node?.frame) return out;
+  const frame = node.frame;
+  out.push({
+    id: frame.id,
+    parentId,
+    name: frame.name || "",
+    url: frame.url || "",
+    securityOrigin: frame.securityOrigin || "",
+    mimeType: frame.mimeType || "",
+    depth,
+  });
+  for (const child of node.childFrames || []) {
+    flattenFrameTree(child, depth + 1, frame.id, out);
+  }
+  return out;
+}
+
+async function getFrameTree(sessionId) {
+  const result = await sendToExtension("Page.getFrameTree", {}, sessionId);
+  return result?.frameTree || null;
+}
+
+async function getFrameContextId(sessionId, frameId) {
+  if (!frameId) return undefined;
+  const result = await sendToExtension("Page.createIsolatedWorld", {
+    frameId,
+    worldName: "browser-relay",
+    // CDP exposes this option with the historical "Univeral" typo.
+    grantUniveralAccess: true,
+  }, sessionId);
+  return result?.executionContextId;
+}
+
+async function evaluateInFrame(sessionId, expression, options = {}) {
+  const { frameId, returnByValue = true, awaitPromise = true } = options;
+  const params = { expression, returnByValue, awaitPromise };
+  const contextId = await getFrameContextId(sessionId, frameId);
+  if (contextId) params.contextId = contextId;
+  return await sendToExtension("Runtime.evaluate", params, sessionId);
+}
+
+async function frameViewportOffset(sessionId, frameId) {
+  if (!frameId) return { x: 0, y: 0 };
+  try {
+    const owner = await sendToExtension("DOM.getFrameOwner", { frameId }, sessionId);
+    const backendNodeId = owner?.backendNodeId;
+    if (!backendNodeId) return { x: 0, y: 0 };
+    const model = await sendToExtension("DOM.getBoxModel", { backendNodeId }, sessionId);
+    const content = model?.model?.content;
+    if (!Array.isArray(content) || content.length < 8) return { x: 0, y: 0 };
+    const xs = [content[0], content[2], content[4], content[6]];
+    const ys = [content[1], content[3], content[5], content[7]];
+    return { x: Math.min(...xs), y: Math.min(...ys) };
+  } catch {
+    return { x: 0, y: 0 };
+  }
+}
+
+function parseJsonString(value, fallback = {}) {
+  try { return JSON.parse(value || JSON.stringify(fallback)); }
+  catch { return fallback; }
+}
+
+function isLoopbackAddress(address) {
+  return ["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"].includes(String(address || ""));
+}
+
+function runtimeExceptionMessage(result) {
+  const details = result?.exceptionDetails;
+  if (!details) return null;
+  return details.exception?.description || details.text || "JavaScript evaluation failed";
+}
+
+function hasWaitCondition(body) {
+  return ["selector", "text", "url", "urlRegex", "expression"]
+    .some((key) => typeof body[key] === "string" && body[key]);
+}
+
+async function findElement(sessionId, selector, frameId) {
+  const findJs = `(function() {
+    var el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return JSON.stringify({ found: false });
+    var rect = el.getBoundingClientRect();
+    return JSON.stringify({
+      found: true,
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      width: rect.width,
+      height: rect.height,
+      tag: el.tagName,
+      text: (el.innerText || el.textContent || el.value || '').trim().slice(0, 100)
+    });
+  })()`;
+  const result = await evaluateInFrame(sessionId, findJs, { frameId });
+  const info = parseJsonString(result?.result?.value, { found: false });
+  if (!info.found) return info;
+  const offset = await frameViewportOffset(sessionId, frameId);
+  return { ...info, x: info.x + offset.x, y: info.y + offset.y };
+}
+
+async function scrollFrameIntoView(sessionId, frameId) {
+  if (!frameId) return;
+  try {
+    const owner = await sendToExtension("DOM.getFrameOwner", { frameId }, sessionId);
+    const backendNodeId = owner?.backendNodeId;
+    if (backendNodeId) {
+      await sendToExtension("DOM.scrollIntoViewIfNeeded", { backendNodeId }, sessionId);
+    }
+  } catch {
+    // Best effort only; frame-local scrolling still runs below.
+  }
+}
+
+async function scrollElementIntoView(sessionId, selector, frameId) {
+  await scrollFrameIntoView(sessionId, frameId);
+  const js = `document.querySelector(${JSON.stringify(selector)})?.scrollIntoView({ block: 'center', inline: 'center' })`;
+  await evaluateInFrame(sessionId, js, { frameId }).catch(() => {});
+}
+
 // ---------------------------------------------------------------------------
 // API route handlers
 // ---------------------------------------------------------------------------
@@ -224,37 +358,48 @@ async function handleEval(req, res) {
   if (!expression || typeof expression !== "string") return errorResponse(res, 400, "expression is required");
   const sessionId = resolveTab(body.tabId);
   const returnByValue = body.returnByValue !== false;
-  const result = await sendToExtension("Runtime.evaluate", { expression, returnByValue, awaitPromise: true }, sessionId);
+  const result = await evaluateInFrame(sessionId, expression, { frameId: body.frameId, returnByValue, awaitPromise: true });
   jsonResponse(res, 200, { ok: true, result: result?.result || null, exceptionDetails: result?.exceptionDetails || null });
+}
+
+async function handleFrames(req, res) {
+  await ensureExtension();
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const tabId = url.searchParams.get("tabId") || undefined;
+  const sessionId = resolveTab(tabId);
+  const frameTree = await getFrameTree(sessionId);
+  const frames = flattenFrameTree(frameTree);
+  jsonResponse(res, 200, { ok: true, frameTree, frames });
 }
 
 async function handleSnapshot(req, res) {
   await ensureExtension();
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const tabId = url.searchParams.get("tabId") || undefined;
+  const frameId = url.searchParams.get("frameId") || undefined;
   const format = url.searchParams.get("format") || "text";
-  const maxLength = parseInt(url.searchParams.get("maxLength") || "100000", 10);
+  const maxLength = boundedNumber(url.searchParams.get("maxLength"), 100000, 1, 1_000_000);
   const sessionId = resolveTab(tabId);
 
   if (format === "html") {
-    const result = await sendToExtension("Runtime.evaluate", { expression: "document.documentElement.outerHTML", returnByValue: true }, sessionId);
+    const result = await evaluateInFrame(sessionId, "document.documentElement.outerHTML", { frameId });
     let html = result?.result?.value || "";
     const truncated = html.length > maxLength;
     if (truncated) html = html.slice(0, maxLength);
-    const titleResult = await sendToExtension("Runtime.evaluate", { expression: "document.title", returnByValue: true }, sessionId);
-    const urlResult = await sendToExtension("Runtime.evaluate", { expression: "location.href", returnByValue: true }, sessionId);
+    const titleResult = await evaluateInFrame(sessionId, "document.title", { frameId });
+    const urlResult = await evaluateInFrame(sessionId, "location.href", { frameId });
     return jsonResponse(res, 200, { ok: true, url: urlResult?.result?.value || "", title: titleResult?.result?.value || "", html, truncated });
   }
 
   const jsWithMaxLen = `var __maxLength = ${maxLength};\n${SNAPSHOT_JS}`;
-  const result = await sendToExtension("Runtime.evaluate", { expression: jsWithMaxLen, returnByValue: true, awaitPromise: false }, sessionId);
+  const result = await evaluateInFrame(sessionId, jsWithMaxLen, { frameId, awaitPromise: false });
   let snapshot = "", truncated = false;
   try {
     const parsed = JSON.parse(result?.result?.value || "{}");
     snapshot = parsed.snapshot || ""; truncated = parsed.truncated || false;
   } catch { snapshot = result?.result?.value || ""; }
-  const titleResult = await sendToExtension("Runtime.evaluate", { expression: "document.title", returnByValue: true }, sessionId);
-  const urlResult = await sendToExtension("Runtime.evaluate", { expression: "location.href", returnByValue: true }, sessionId);
+  const titleResult = await evaluateInFrame(sessionId, "document.title", { frameId });
+  const urlResult = await evaluateInFrame(sessionId, "location.href", { frameId });
   jsonResponse(res, 200, { ok: true, url: urlResult?.result?.value || "", title: titleResult?.result?.value || "", snapshot, truncated });
 }
 
@@ -264,20 +409,17 @@ async function handleClick(req, res) {
   const selector = body.selector;
   if (!selector || typeof selector !== "string") return errorResponse(res, 400, "selector is required");
   const sessionId = resolveTab(body.tabId);
+  const frameId = body.frameId;
 
-  const findJs = `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return JSON.stringify({ found: false }); var rect = el.getBoundingClientRect(); return JSON.stringify({ found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (el.innerText || el.textContent || '').trim().slice(0, 100) }); })()`;
-  const findResult = await sendToExtension("Runtime.evaluate", { expression: findJs, returnByValue: true }, sessionId);
-  const elInfo = JSON.parse(findResult?.result?.value || '{\"found\":false}');
+  const elInfo = await findElement(sessionId, selector, frameId);
   if (!elInfo.found) return jsonResponse(res, 200, { ok: false, error: `Element not found: ${selector}` });
 
   const button = body.button || "left";
   const clickCount = body.doubleClick ? 2 : 1;
-  const x = Math.round(elInfo.x), y = Math.round(elInfo.y);
 
-  await sendToExtension("Runtime.evaluate", { expression: `document.querySelector(${JSON.stringify(selector)})?.scrollIntoView({block:'center'})`, returnByValue: true }, sessionId).catch(() => {});
+  await scrollElementIntoView(sessionId, selector, frameId);
 
-  const findResult2 = await sendToExtension("Runtime.evaluate", { expression: findJs, returnByValue: true }, sessionId);
-  const elInfo2 = JSON.parse(findResult2?.result?.value || '{\"found\":false}');
+  const elInfo2 = await findElement(sessionId, selector, frameId);
   const fx = Math.round(elInfo2.found ? elInfo2.x : elInfo.x);
   const fy = Math.round(elInfo2.found ? elInfo2.y : elInfo.y);
 
@@ -285,7 +427,7 @@ async function handleClick(req, res) {
   await sendToExtension("Input.dispatchMouseEvent", { type: "mousePressed", x: fx, y: fy, button, clickCount }, sessionId);
   await sendToExtension("Input.dispatchMouseEvent", { type: "mouseReleased", x: fx, y: fy, button, clickCount }, sessionId);
 
-  jsonResponse(res, 200, { ok: true, clicked: true, elementText: elInfo2.text || elInfo.text || "", selector });
+  jsonResponse(res, 200, { ok: true, clicked: true, elementText: elInfo2.text || elInfo.text || "", selector, frameId });
 }
 
 async function handleType(req, res) {
@@ -295,17 +437,42 @@ async function handleType(req, res) {
   if (typeof text !== "string") return errorResponse(res, 400, "text is required");
   const sessionId = resolveTab(body.tabId);
   const selector = body.selector;
+  const frameId = body.frameId;
   const submit = body.submit || false;
   const clear = body.clear || false;
 
   if (selector) {
-    const focusJs = `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return JSON.stringify({ found: false }); el.focus(); return JSON.stringify({ found: true }); })()`;
-    const focusResult = await sendToExtension("Runtime.evaluate", { expression: focusJs, returnByValue: true }, sessionId);
-    const info = JSON.parse(focusResult?.result?.value || '{\"found\":false}');
+    await scrollElementIntoView(sessionId, selector, frameId);
+    const focusJs = `(function() {
+      var el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return JSON.stringify({ found: false });
+      el.focus({ preventScroll: false });
+      if (${clear ? "true" : "false"}) {
+        if (el.isContentEditable) {
+          el.textContent = '';
+        } else if ('value' in el) {
+          var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          var descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+          if (descriptor && descriptor.set) descriptor.set.call(el, '');
+          else el.value = '';
+        } else {
+          el.textContent = '';
+        }
+        try {
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
+        } catch (_) {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      return JSON.stringify({ found: true, tag: el.tagName, type: el.type || '', contentEditable: !!el.isContentEditable });
+    })()`;
+    const focusResult = await evaluateInFrame(sessionId, focusJs, { frameId });
+    const info = parseJsonString(focusResult?.result?.value, { found: false });
     if (!info.found) return jsonResponse(res, 200, { ok: false, error: `Element not found: ${selector}` });
   }
 
-  if (clear) {
+  if (clear && !selector) {
     await sendToExtension("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", modifiers: 2 }, sessionId);
     await sendToExtension("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers: 2 }, sessionId);
     await sendToExtension("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace" }, sessionId);
@@ -319,7 +486,7 @@ async function handleType(req, res) {
     await sendToExtension("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }, sessionId);
   }
 
-  jsonResponse(res, 200, { ok: true, typed: true });
+  jsonResponse(res, 200, { ok: true, typed: true, frameId });
 }
 
 async function handleScreenshot(req, res) {
@@ -337,15 +504,16 @@ async function handleScroll(req, res) {
   await ensureExtension();
   const body = await readBody(req);
   const sessionId = resolveTab(body.tabId);
+  const frameId = body.frameId;
   const direction = body.direction || "down";
-  const amount = body.amount || 800;
+  const amount = boundedNumber(body.amount, 800, 1, 100_000);
   const js = direction === "bottom"
     ? "window.scrollTo(0, document.body.scrollHeight)"
     : direction === "top"
     ? "window.scrollTo(0, 0)"
     : `window.scrollBy(0, ${direction === "down" ? amount : -amount})`;
-  await sendToExtension("Runtime.evaluate", { expression: js, returnByValue: true }, sessionId);
-  jsonResponse(res, 200, { ok: true, scrolled: true, direction });
+  await evaluateInFrame(sessionId, js, { frameId });
+  jsonResponse(res, 200, { ok: true, scrolled: true, direction, frameId });
 }
 
 async function handleDownload(req, res) {
@@ -354,11 +522,156 @@ async function handleDownload(req, res) {
   const selector = body.selector;
   if (!selector || typeof selector !== "string") return errorResponse(res, 400, "selector is required (e.g. 'img[src=...]' or 'a[href=...]')");
   const sessionId = resolveTab(body.tabId);
-  const result = await sendToExtension("Runtime.evaluate", {
-    expression: `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return { found: false }; var url = el.src || el.href || ''; var tag = el.tagName; return { found: true, url, tag }; })()`,
-    returnByValue: true,
-  }, sessionId);
-  jsonResponse(res, 200, { ok: true, ...result?.result?.value });
+  const frameId = body.frameId;
+  const result = await evaluateInFrame(sessionId, `(function() {
+    var el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return JSON.stringify({ found: false });
+    var url = el.src || el.href || '';
+    var tag = el.tagName;
+    return JSON.stringify({ found: true, url, tag });
+  })()`, { frameId });
+  const data = parseJsonString(result?.result?.value, { found: false });
+  jsonResponse(res, 200, { ok: true, ...data, frameId });
+}
+
+async function checkWaitCondition(sessionId, body) {
+  const frameId = body.frameId;
+  const checks = [];
+
+  if (typeof body.selector === "string" && body.selector) {
+    const visible = body.visible === true;
+    checks.push({
+      kind: "selector",
+      run: async () => {
+        const js = `(function() {
+          var el = document.querySelector(${JSON.stringify(body.selector)});
+          if (!el) return JSON.stringify({ matched: false, found: false });
+          var rect = el.getBoundingClientRect();
+          var style = window.getComputedStyle(el);
+          var visible = !!(rect.width || rect.height) && style.visibility !== 'hidden' && style.display !== 'none';
+          return JSON.stringify({ matched: ${visible ? "visible" : "true"}, found: true, visible: visible, text: (el.innerText || el.textContent || el.value || '').trim().slice(0, 200) });
+        })()`;
+        const result = await evaluateInFrame(sessionId, js, { frameId });
+        return parseJsonString(result?.result?.value, { matched: false });
+      },
+    });
+  }
+
+  if (typeof body.text === "string" && body.text) {
+    checks.push({
+      kind: "text",
+      run: async () => {
+        const js = `(function() {
+          var haystack = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+          return JSON.stringify({ matched: haystack.includes(${JSON.stringify(body.text)}) });
+        })()`;
+        const result = await evaluateInFrame(sessionId, js, { frameId });
+        return parseJsonString(result?.result?.value, { matched: false });
+      },
+    });
+  }
+
+  if (typeof body.url === "string" && body.url) {
+    checks.push({
+      kind: "url",
+      run: async () => {
+        const js = `JSON.stringify({ matched: location.href.includes(${JSON.stringify(body.url)}), url: location.href })`;
+        const result = await evaluateInFrame(sessionId, js, { frameId });
+        return parseJsonString(result?.result?.value, { matched: false });
+      },
+    });
+  }
+
+  if (typeof body.urlRegex === "string" && body.urlRegex) {
+    new RegExp(body.urlRegex);
+    checks.push({
+      kind: "urlRegex",
+      run: async () => {
+        const js = `JSON.stringify({ matched: new RegExp(${JSON.stringify(body.urlRegex)}).test(location.href), url: location.href })`;
+        const result = await evaluateInFrame(sessionId, js, { frameId });
+        return parseJsonString(result?.result?.value, { matched: false });
+      },
+    });
+  }
+
+  if (typeof body.expression === "string" && body.expression) {
+    checks.push({
+      kind: "expression",
+      run: async () => {
+        const js = `(async function() {
+          var value = await (${body.expression});
+          return JSON.stringify({ matched: !!value, value: value });
+        })()`;
+        const result = await evaluateInFrame(sessionId, js, { frameId });
+        const exception = runtimeExceptionMessage(result);
+        if (exception) return { matched: false, error: exception };
+        return parseJsonString(result?.result?.value, { matched: false });
+      },
+    });
+  }
+
+  if (!checks.length) {
+    throw new Error("wait requires selector, text, url, urlRegex, or expression");
+  }
+
+  const results = [];
+  for (const check of checks) {
+    const result = await check.run();
+    results.push({ kind: check.kind, ...result });
+  }
+  return { matched: results.every((result) => result.matched), results };
+}
+
+async function handleWait(req, res) {
+  await ensureExtension();
+  const body = await readBody(req);
+  if (!hasWaitCondition(body)) {
+    return errorResponse(res, 400, "wait requires selector, text, url, urlRegex, or expression");
+  }
+  if (typeof body.urlRegex === "string" && body.urlRegex) {
+    try { new RegExp(body.urlRegex); }
+    catch (err) {
+      return errorResponse(res, 400, `Invalid urlRegex: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  const sessionId = resolveTab(body.tabId);
+  const timeoutMs = boundedNumber(body.timeoutMs ?? body.timeout, DEFAULT_WAIT_TIMEOUT_MS, 1, MAX_WAIT_TIMEOUT_MS);
+  const pollMs = boundedNumber(body.pollMs ?? body.poll, DEFAULT_WAIT_POLL_MS, 50, 10_000);
+  const start = Date.now();
+  let lastResult = null;
+
+  while (Date.now() - start <= timeoutMs) {
+    lastResult = await checkWaitCondition(sessionId, body);
+    if (lastResult.matched) {
+      return jsonResponse(res, 200, { ok: true, matched: true, elapsedMs: Date.now() - start, ...lastResult });
+    }
+    await sleep(pollMs);
+  }
+
+  jsonResponse(res, 200, {
+    ok: false,
+    matched: false,
+    timeout: true,
+    elapsedMs: Date.now() - start,
+    error: `Wait timed out after ${timeoutMs}ms`,
+    lastResult,
+  });
+}
+
+async function handleCdp(req, res) {
+  await ensureExtension();
+  if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    return errorResponse(res, 403, "CDP passthrough is only available from loopback clients");
+  }
+  const body = await readBody(req);
+  const method = body.method;
+  if (!method || typeof method !== "string") return errorResponse(res, 400, "method is required");
+  const params = body.params && typeof body.params === "object" ? body.params : {};
+  const sessionId = typeof body.sessionId === "string" && body.sessionId
+    ? body.sessionId
+    : resolveTab(body.tabId);
+  const result = await sendToExtension(method, params, sessionId);
+  jsonResponse(res, 200, { ok: true, result });
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +731,7 @@ const server = createServer(async (req, res) => {
     const routeMap = {
       "GET /api/tabs": handleTabs,
       "POST /api/navigate": handleNavigate,
+      "GET /api/frames": handleFrames,
       "POST /api/eval": handleEval,
       "GET /api/snapshot": handleSnapshot,
       "POST /api/click": handleClick,
@@ -426,6 +740,8 @@ const server = createServer(async (req, res) => {
       "POST /api/screenshot": handleScreenshot,
       "POST /api/scroll": handleScroll,
       "POST /api/download": handleDownload,
+      "POST /api/wait": handleWait,
+      "POST /api/cdp": handleCdp,
     };
 
     const routeKey = `${req.method} ${path}`;
