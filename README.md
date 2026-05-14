@@ -128,7 +128,7 @@ After that, your agent can operate your own browser without opening a separate a
 Browser Relay is designed to be comfortable for agents, not just low-level automation scripts.
 
 - The included Skill tells agents when to use Browser Relay and how to interact safely.
-- The MCP server exposes high-level tools such as `browser_tabs`, `browser_snapshot`, `browser_click`, `browser_type`, and `browser_screenshot`.
+- The MCP server exposes high-level tools such as `browser_tabs`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_key`, and `browser_screenshot`.
 - The HTTP API is simple enough for any custom agent or script.
 - Page snapshots are annotated with links, buttons, inputs, and other interactive elements so agents can plan before acting.
 - Actions target existing attached tabs, keeping the user's browser context visible and predictable.
@@ -159,6 +159,7 @@ browser-relay tabs
 browser-relay snapshot --tab ABC123 --max-length 20000
 browser-relay click 'button[type=submit]' --tab ABC123
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+browser-relay key Control+L
 browser-relay scroll down --amount 1000
 browser-relay screenshot /tmp/page.png --full-page
 browser-relay eval 'document.title'
@@ -204,6 +205,7 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/snapshot` | GET | Get annotated text or raw HTML |
 | `/api/click` | POST | Click an element by CSS selector |
 | `/api/type` | POST | Type into an input |
+| `/api/key` | POST | Press a key or keyboard shortcut |
 | `/api/scroll` | POST | Scroll the page |
 | `/api/screenshot` | GET/POST | Capture a PNG screenshot |
 | `/api/eval` | POST | Evaluate JavaScript in the page |
@@ -227,6 +229,7 @@ browser-relay tabs       # List attached browser tabs
 browser-relay snapshot   # Print annotated page text
 browser-relay click      # Click an element by CSS selector
 browser-relay type       # Type text into the page
+browser-relay key        # Press a key or shortcut
 browser-relay screenshot # Save a PNG screenshot
 browser-relay eval       # Evaluate JavaScript in the page
 browser-relay api-help   # Show browser command examples

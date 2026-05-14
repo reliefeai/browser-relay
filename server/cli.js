@@ -174,6 +174,7 @@ Browser commands:
   snapshot    Print annotated page text
   click       Click an element by CSS selector
   type        Type text into an input or focused element
+  key         Press a key or keyboard shortcut
   scroll      Scroll the page
   screenshot  Save a PNG screenshot
   eval        Evaluate JavaScript in the page
@@ -407,6 +408,22 @@ async function browserApiCommand(cmd, args) {
       console.log("Typed.");
       return;
     }
+    case "key": {
+      const combo = requireValue(flagValue(flags, "key", "combo") || positional.join("+"), "key or combo is required");
+      const data = await relayRequest("POST", "/api/key", {
+        combo,
+        tabId: tabIdFrom(flags),
+        ctrl: flagBool(flags, "ctrl", "control"),
+        alt: flagBool(flags, "alt", "option"),
+        shift: flagBool(flags, "shift"),
+        meta: flagBool(flags, "meta", "cmd", "command"),
+        text: flagValue(flags, "text"),
+      });
+      ensureOk(data);
+      if (json) return printData(data, true);
+      console.log(`Pressed: ${combo}`);
+      return;
+    }
     case "scroll": {
       const direction = flagValue(flags, "direction") || positional[0] || "down";
       const amount = flagValue(flags, "amount");
@@ -482,6 +499,7 @@ function apiHelp() {
   snapshot [--tab id]          Print annotated page text
   click <selector>             Click a CSS selector
   type <text>                  Type text into the focused element
+  key <key|combo>              Press a key or combo (Enter, Escape, Control+L)
   scroll [down|up|top|bottom]  Scroll the page
   screenshot <file.png>        Save a PNG screenshot
   eval <js>                    Evaluate JavaScript in the page
@@ -498,6 +516,7 @@ Examples:
   browser-relay snapshot --tab ABC123 --max-length 20000
   browser-relay click 'button[type=submit]'
   browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+  browser-relay key Control+L
   browser-relay screenshot /tmp/page.png --full-page
   browser-relay eval --stdin < script.js
 `);
@@ -529,6 +548,7 @@ switch (cmd) {
   case "snapshot":
   case "click":
   case "type":
+  case "key":
   case "scroll":
   case "screenshot":
   case "eval":
