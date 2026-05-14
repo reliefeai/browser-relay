@@ -49,6 +49,7 @@ only when you need the full API response.
 
 ```bash
 browser-relay tabs
+browser-relay network --tab <tabId> --limit 50
 browser-relay snapshot --tab <tabId> --max-length 20000
 browser-relay click 'button[type=submit]' --tab <tabId>
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --tab <tabId>
@@ -83,6 +84,15 @@ POST http://127.0.0.1:18795/api/navigate
 Header: Content-Type: application/json
 Body: { "url": "https://example.com", "tabId?": "optional-target-id" }
 ```
+
+### 2b. browser_network
+Read captured network request, response, finish, and failure events. Sensitive headers such as Cookie, Authorization, and Set-Cookie are redacted.
+```
+GET http://127.0.0.1:18795/api/network?tabId=<id>&type=response&method=GET&status=200&limit=100&clear=false
+POST http://127.0.0.1:18795/api/network/clear
+Body: { "tabId?": "...", "type?": "response", "requestId?": "..." }
+```
+Use this after navigation or actions that trigger requests to diagnose failed loads, redirects, API statuses, and blocked resources.
 
 ### 3. browser_snapshot
 Get a text representation of the current page (interactive elements annotated).
@@ -148,8 +158,9 @@ When asked to do something with a web page:
 3. **`browser-relay snapshot`** — understand the page structure
 4. **Plan actions** based on snapshot (click what, type where)
 5. **Execute** (`browser-relay click`, `browser-relay type`, `browser-relay scroll`) one at a time
-6. **Re-snapshot** after each action to verify state
-7. **Screenshot** if visual confirmation is needed
+6. **`browser-relay network`** after navigation or if requests fail, hang, or return unexpected statuses
+7. **Re-snapshot** after each action to verify state
+8. **Screenshot** if visual confirmation is needed
 
 ## Example Session
 

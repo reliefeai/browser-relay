@@ -56,6 +56,36 @@ const TOOLS = [
     handler: async (args) => relayPost("/api/navigate", args),
   },
   {
+    name: "browser_network",
+    description: "Read captured network request, response, finish, and failure events from attached tabs. Sensitive headers such as Cookie, Authorization, and Set-Cookie are redacted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string", description: "Tab targetId (optional)" },
+        type: { type: "string", description: "Filter event type: request, response, finished, failed" },
+        method: { type: "string", description: "Filter by HTTP method, e.g. GET or POST" },
+        status: { type: "number", description: "Filter responses by HTTP status code" },
+        url: { type: "string", description: "Filter entries whose URL contains this text" },
+        requestId: { type: "string", description: "Filter by CDP requestId" },
+        limit: { type: "number", description: "Maximum entries to return (default: 100)" },
+        clear: { type: "boolean", description: "Clear returned entries after reading" },
+      },
+    },
+    handler: async (args) => {
+      const params = new URLSearchParams();
+      if (args.tabId) params.set("tabId", args.tabId);
+      if (args.type) params.set("type", args.type);
+      if (args.method) params.set("method", args.method);
+      if (args.status !== undefined) params.set("status", String(args.status));
+      if (args.url) params.set("url", args.url);
+      if (args.requestId) params.set("requestId", args.requestId);
+      if (args.limit !== undefined) params.set("limit", String(args.limit));
+      if (args.clear) params.set("clear", "true");
+      const qs = params.toString();
+      return relayGet(`/api/network${qs ? "?" + qs : ""}`);
+    },
+  },
+  {
     name: "browser_snapshot",
     description: "Get a text representation of the page. Returns annotated text with clickable elements (links, buttons, inputs) marked for easy reference. Use this to understand what is on the page before interacting.",
     inputSchema: {

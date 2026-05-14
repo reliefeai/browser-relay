@@ -171,6 +171,7 @@ Commands:
 
 Browser commands:
   tabs        List attached Chrome tabs
+  network     Print captured network request/response events
   snapshot    Print annotated page text
   click       Click an element by CSS selector
   type        Type text into an input or focused element
@@ -342,6 +343,23 @@ function printTabs(data, json) {
   }
 }
 
+function printNetwork(data, json) {
+  if (json) return printData(data, true);
+  const entries = data?.entries || [];
+  if (!entries.length) {
+    console.log("No network entries.");
+    return;
+  }
+  for (const entry of entries) {
+    const time = entry.receivedAt || "";
+    const type = entry.type || "event";
+    const method = entry.method ? `${entry.method} ` : "";
+    const status = entry.status !== undefined ? `${entry.status} ` : "";
+    const detail = entry.errorText || entry.url || entry.requestId || "";
+    console.log(`[${time}] ${type} ${method}${status}${detail}`.trim());
+  }
+}
+
 function ensureOk(data) {
   if (data?.ok === false) throw new Error(data.error || "Command failed");
 }
@@ -357,6 +375,19 @@ async function browserApiCommand(cmd, args) {
     case "tabs":
     case "list": {
       return printTabs(await relayRequest("GET", "/api/tabs"), json);
+    }
+    case "network": {
+      const params = new URLSearchParams();
+      addParam(params, "tabId", tabIdFrom(flags));
+      addParam(params, "type", flagValue(flags, "type"));
+      addParam(params, "method", flagValue(flags, "method"));
+      addParam(params, "status", flagValue(flags, "status"));
+      addParam(params, "requestId", flagValue(flags, "request-id", "requestId"));
+      addParam(params, "url", flagValue(flags, "url", "url-includes", "urlIncludes"));
+      addParam(params, "limit", flagValue(flags, "limit"));
+      if (flagBool(flags, "clear")) params.set("clear", "true");
+      const qs = params.toString();
+      return printNetwork(await relayRequest("GET", `/api/network${qs ? `?${qs}` : ""}`), json);
     }
     case "navigate":
     case "go":
@@ -478,6 +509,7 @@ function apiHelp() {
   console.log(`Browser operation commands:
   tabs                         List attached Chrome tabs
   debug                        Show relay diagnostics
+  network [--tab id]           Print captured network events
   navigate <url> [--tab id]    Navigate an attached tab
   snapshot [--tab id]          Print annotated page text
   click <selector>             Click a CSS selector
@@ -490,11 +522,16 @@ function apiHelp() {
 Common flags:
   --tab, -t <id>               Target tab id from 'browser-relay tabs'
   --json, -j                   Print JSON response
+  --type <request|response|finished|failed>
+  --method <GET|POST>          Filter network entries by method
+  --status <code>              Filter network responses by status
+  --limit <n>                  Limit network entries
   --selector, -s <css>         Selector for click/type/download
   --stdin                      Read text/expression from stdin
 
 Examples:
   browser-relay tabs
+  browser-relay network --limit 50
   browser-relay snapshot --tab ABC123 --max-length 20000
   browser-relay click 'button[type=submit]'
   browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
@@ -522,6 +559,7 @@ switch (cmd) {
   case "uninstall": await uninstall(); break;
   case "tabs":
   case "list":
+  case "network":
   case "debug":
   case "navigate":
   case "go":

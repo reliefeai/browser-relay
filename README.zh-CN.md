@@ -120,6 +120,7 @@ Browser Relay 不是只给底层自动化脚本使用的，它也专门面向 Ag
 - HTTP API 足够简单，自定义 Agent 或脚本也可以直接调用。
 - 页面快照会标注链接、按钮、输入框等交互元素，方便 Agent 先理解页面再行动。
 - 操作会落在已附加的真实标签页上，让用户的浏览器上下文保持可见、可预期。
+- Network 捕获会记录请求、响应、完成和失败事件，并自动脱敏敏感 header。
 
 ## MCP 配置
 
@@ -142,6 +143,7 @@ Browser Relay 不是只给底层自动化脚本使用的，它也专门面向 Ag
 
 ```bash
 browser-relay tabs
+browser-relay network --tab ABC123 --limit 50
 browser-relay snapshot --tab ABC123 --max-length 20000
 browser-relay click 'button[type=submit]' --tab ABC123
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
@@ -169,6 +171,8 @@ HTTP API 是给代码和自定义工具集成用的稳定接口。交互式 Agen
 ```bash
 curl http://127.0.0.1:18795/api/tabs
 
+curl "http://127.0.0.1:18795/api/network?tabId=ABC123&type=response&limit=50"
+
 curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123"
 
 curl -X POST http://127.0.0.1:18795/api/click \
@@ -183,6 +187,8 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/` | GET/HEAD | 健康检查 |
 | `/api/debug` | GET | 服务状态和诊断信息 |
 | `/api/tabs` | GET | 列出已附加标签页 |
+| `/api/network` | GET | 读取网络请求和响应事件 |
+| `/api/network/clear` | POST | 清理网络事件记录 |
 | `/api/navigate` | POST | 导航已附加标签页 |
 | `/api/snapshot` | GET | 获取页面文本快照或 HTML |
 | `/api/click` | POST | 按 CSS selector 点击元素 |
@@ -207,6 +213,7 @@ browser-relay install    # 注册后台服务
 browser-relay uninstall  # 卸载后台服务
 
 browser-relay tabs       # 列出已附加标签页
+browser-relay network    # 输出网络事件记录
 browser-relay snapshot   # 输出页面结构化文本
 browser-relay click      # 按 CSS selector 点击元素
 browser-relay type       # 输入文本

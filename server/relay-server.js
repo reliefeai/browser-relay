@@ -17,6 +17,8 @@ const PING_INTERVAL_MS = 5_000;
 const COMMAND_TIMEOUT_MS = 30_000;
 const EXTENSION_GRACE_MS = 20_000;
 const MAX_BODY_SIZE = 64 * 1024; // 64KB
+const MAX_NETWORK_ENTRIES = 1_000;
+const SENSITIVE_NETWORK_HEADERS = new Set(["authorization", "proxy-authorization", "cookie", "set-cookie"]);
 
 const serverStartTime = Date.now();
 
@@ -44,6 +46,10 @@ let extensionRemoteAddress = null;
 const connectedTargets = new Map(); // sessionId -> { tabId, targetId, targetInfo }
 let nextExtensionId = 1;
 const pendingCommands = new Map();
+let nextNetworkEntryId = 1;
+let networkEntries = [];
+const networkEnabledSessions = new Set();
+const networkRequestMeta = new Map();
 
 let pingTimer = null;
 let graceTimer = null;
@@ -66,7 +72,7 @@ function scheduleGraceCleanup() {
   clearGraceTimer();
   graceTimer = setTimeout(() => {
     graceTimer = null;
-    if (!extensionConnected()) { connectedTargets.clear(); flushReconnectWaiters(false); }
+    if (!extensionConnected()) { connectedTargets.clear(); networkEnabledSessions.clear(); flushReconnectWaiters(false); }
   }, EXTENSION_GRACE_MS);
 }
 
@@ -118,6 +124,165 @@ function resolveTab(tabId) {
   return resolveSession(tabId);
 }
 
+function boundedNumber(value, fallback, min, max) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function targetForSession(sessionId) {
+  return connectedTargets.get(sessionId) || null;
+}
+
+function sanitizeNetworkHeaders(headers = {}) {
+  const sanitized = {};
+  for (const [name, value] of Object.entries(headers || {})) {
+    const key = String(name).toLowerCase();
+    if (SENSITIVE_NETWORK_HEADERS.has(key)) {
+      sanitized[name] = "[redacted]";
+      continue;
+    }
+    const text = Array.isArray(value) ? value.join(", ") : String(value);
+    sanitized[name] = text.length > 1_000 ? `${text.slice(0, 1_000)}...` : text;
+  }
+  return sanitized;
+}
+
+function pruneNetworkRequestMeta() {
+  if (networkRequestMeta.size <= MAX_NETWORK_ENTRIES * 2) return;
+  for (const key of networkRequestMeta.keys()) {
+    networkRequestMeta.delete(key);
+    if (networkRequestMeta.size <= MAX_NETWORK_ENTRIES) break;
+  }
+}
+
+function appendNetworkEntry(entry) {
+  networkEntries.push({ id: nextNetworkEntryId++, receivedAt: new Date().toISOString(), ...entry });
+  if (networkEntries.length > MAX_NETWORK_ENTRIES) {
+    networkEntries = networkEntries.slice(-MAX_NETWORK_ENTRIES);
+  }
+}
+
+function baseNetworkEntry(sessionId) {
+  const target = targetForSession(sessionId);
+  return {
+    sessionId: sessionId || "",
+    tabId: target?.targetId || "",
+    pageUrl: target?.targetInfo?.url || "",
+    title: target?.targetInfo?.title || "",
+  };
+}
+
+function appendNetworkEvent(sessionId, method, params = {}) {
+  const base = baseNetworkEntry(sessionId);
+  const requestId = params.requestId || "";
+  const meta = requestId ? networkRequestMeta.get(requestId) : null;
+
+  if (method === "Network.requestWillBeSent") {
+    const request = params.request || {};
+    const entry = {
+      ...base,
+      type: "request",
+      pageUrl: params.documentURL || base.pageUrl,
+      requestId,
+      loaderId: params.loaderId || "",
+      documentURL: params.documentURL || "",
+      url: request.url || params.documentURL || base.pageUrl,
+      method: request.method || "",
+      resourceType: params.type || "",
+      headers: sanitizeNetworkHeaders(request.headers),
+      hasPostData: Boolean(request.hasPostData || request.postData),
+      initiator: params.initiator || null,
+      timestamp: params.timestamp || null,
+      wallTime: params.wallTime || null,
+    };
+    if (requestId) {
+      networkRequestMeta.set(requestId, {
+        method: entry.method,
+        url: entry.url,
+        documentURL: entry.documentURL,
+        resourceType: entry.resourceType,
+        tabId: entry.tabId,
+      });
+      pruneNetworkRequestMeta();
+    }
+    appendNetworkEntry(entry);
+    return;
+  }
+
+  if (method === "Network.responseReceived") {
+    const response = params.response || {};
+    appendNetworkEntry({
+      ...base,
+      type: "response",
+      pageUrl: meta?.documentURL || base.pageUrl,
+      requestId,
+      loaderId: params.loaderId || "",
+      url: response.url || meta?.url || base.pageUrl,
+      method: meta?.method || "",
+      status: response.status,
+      statusText: response.statusText || "",
+      resourceType: params.type || meta?.resourceType || "",
+      mimeType: response.mimeType || "",
+      protocol: response.protocol || "",
+      remoteIPAddress: response.remoteIPAddress || "",
+      remotePort: response.remotePort,
+      fromDiskCache: Boolean(response.fromDiskCache),
+      fromServiceWorker: Boolean(response.fromServiceWorker),
+      encodedDataLength: response.encodedDataLength,
+      headers: sanitizeNetworkHeaders(response.headers),
+      timestamp: params.timestamp || null,
+    });
+    return;
+  }
+
+  if (method === "Network.loadingFinished") {
+    appendNetworkEntry({
+      ...base,
+      type: "finished",
+      pageUrl: meta?.documentURL || base.pageUrl,
+      requestId,
+      url: meta?.url || base.pageUrl,
+      method: meta?.method || "",
+      resourceType: meta?.resourceType || "",
+      encodedDataLength: params.encodedDataLength,
+      timestamp: params.timestamp || null,
+    });
+    if (requestId) networkRequestMeta.delete(requestId);
+    return;
+  }
+
+  if (method === "Network.loadingFailed") {
+    appendNetworkEntry({
+      ...base,
+      type: "failed",
+      pageUrl: meta?.documentURL || base.pageUrl,
+      requestId,
+      url: meta?.url || base.pageUrl,
+      method: meta?.method || "",
+      resourceType: params.type || meta?.resourceType || "",
+      errorText: params.errorText || "",
+      blockedReason: params.blockedReason || "",
+      canceled: Boolean(params.canceled),
+      corsErrorStatus: params.corsErrorStatus || null,
+      timestamp: params.timestamp || null,
+    });
+    if (requestId) networkRequestMeta.delete(requestId);
+  }
+}
+
+async function enableNetworkCapture(sessionId) {
+  if (!sessionId || networkEnabledSessions.has(sessionId)) return;
+  networkEnabledSessions.add(sessionId);
+  try {
+    await sendToExtension("Network.enable", {}, sessionId);
+  } catch (err) {
+    networkEnabledSessions.delete(sessionId);
+    throw err;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Handle extension messages
 // ---------------------------------------------------------------------------
@@ -139,22 +304,33 @@ function onExtensionMessage(data) {
   if (msg?.method === "forwardCDPEvent") {
     const cdpMethod = msg.params?.method;
     const cdpParams = msg.params?.params;
+    const eventSessionId = msg.params?.sessionId;
+
+    if (eventSessionId && (
+      cdpMethod === "Network.requestWillBeSent" ||
+      cdpMethod === "Network.responseReceived" ||
+      cdpMethod === "Network.loadingFinished" ||
+      cdpMethod === "Network.loadingFailed"
+    )) {
+      appendNetworkEvent(eventSessionId, cdpMethod, cdpParams);
+    }
 
     if (cdpMethod === "Target.attachedToTarget") {
       const { sessionId, targetInfo } = cdpParams || {};
       if (sessionId && targetInfo?.targetId && (targetInfo?.type ?? "page") === "page") {
         connectedTargets.set(sessionId, { sessionId, targetId: targetInfo.targetId, targetInfo });
+        void enableNetworkCapture(sessionId).catch((err) => LOG.warn("network.enable.failed", { sessionId, error: err.message || String(err) }));
       }
     } else if (cdpMethod === "Target.detachedFromTarget") {
       const { sessionId, targetId } = cdpParams || {};
-      if (sessionId) connectedTargets.delete(sessionId);
-      else if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) connectedTargets.delete(sid); } }
+      if (sessionId) { connectedTargets.delete(sessionId); networkEnabledSessions.delete(sessionId); }
+      else if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) { connectedTargets.delete(sid); networkEnabledSessions.delete(sid); } } }
     } else if (cdpMethod === "Target.targetInfoChanged") {
       const info = cdpParams?.targetInfo;
       if (info?.targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === info.targetId) { connectedTargets.set(sid, { ...t, targetInfo: { ...t.targetInfo, ...info } }); } } }
     } else if (cdpMethod === "Target.targetDestroyed" || cdpMethod === "Target.targetCrashed") {
       const targetId = cdpParams?.targetId;
-      if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) connectedTargets.delete(sid); } }
+      if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) { connectedTargets.delete(sid); networkEnabledSessions.delete(sid); } } }
     }
   }
 }
@@ -199,6 +375,58 @@ async function handleTabs(_req, res) {
   jsonResponse(res, 200, { ok: true, tabs });
 }
 
+async function handleNetwork(req, res) {
+  await ensureExtension();
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const tabId = url.searchParams.get("tabId") || undefined;
+  const type = url.searchParams.get("type") || undefined;
+  const method = url.searchParams.get("method") || undefined;
+  const status = url.searchParams.get("status") || undefined;
+  const requestId = url.searchParams.get("requestId") || undefined;
+  const urlIncludes = url.searchParams.get("url") || url.searchParams.get("urlIncludes") || undefined;
+  const clear = url.searchParams.get("clear") === "true";
+  const limit = boundedNumber(url.searchParams.get("limit"), 100, 0, MAX_NETWORK_ENTRIES);
+
+  if (tabId) {
+    await enableNetworkCapture(resolveTab(tabId)).catch(() => {});
+  } else {
+    await Promise.all([...connectedTargets.keys()].map((sessionId) => enableNetworkCapture(sessionId).catch(() => {})));
+  }
+
+  let entries = networkEntries;
+  if (tabId) entries = entries.filter((entry) => entry.tabId === tabId);
+  if (type) entries = entries.filter((entry) => entry.type === type);
+  if (method) entries = entries.filter((entry) => entry.method === method);
+  if (status) entries = entries.filter((entry) => String(entry.status) === String(status));
+  if (requestId) entries = entries.filter((entry) => entry.requestId === requestId);
+  if (urlIncludes) entries = entries.filter((entry) => String(entry.url || "").includes(urlIncludes));
+  const matchedTotal = entries.length;
+  const selected = limit === 0 ? [] : entries.slice(-limit);
+
+  if (clear) {
+    const ids = new Set(selected.map((entry) => entry.id));
+    networkEntries = networkEntries.filter((entry) => !ids.has(entry.id));
+  }
+
+  jsonResponse(res, 200, { ok: true, entries: selected, count: selected.length, total: matchedTotal, storedTotal: networkEntries.length });
+}
+
+async function handleNetworkClear(req, res) {
+  await ensureExtension();
+  const body = await readBody(req);
+  const tabId = body.tabId;
+  const type = body.type;
+  const requestId = body.requestId;
+  const before = networkEntries.length;
+  networkEntries = networkEntries.filter((entry) => {
+    if (tabId && entry.tabId !== tabId) return true;
+    if (type && entry.type !== type) return true;
+    if (requestId && entry.requestId !== requestId) return true;
+    return false;
+  });
+  jsonResponse(res, 200, { ok: true, cleared: before - networkEntries.length, total: networkEntries.length });
+}
+
 async function handleNavigate(req, res) {
   await ensureExtension();
   const body = await readBody(req);
@@ -214,6 +442,10 @@ async function handleNavigate(req, res) {
     const urlResult = await sendToExtension("Runtime.evaluate", { expression: "location.href", returnByValue: true }, sessionId);
     finalUrl = urlResult?.result?.value || url;
   } catch { /* non-critical */ }
+  const target = connectedTargets.get(sessionId);
+  if (target) {
+    connectedTargets.set(sessionId, { ...target, targetInfo: { ...target.targetInfo, title, url: finalUrl } });
+  }
   jsonResponse(res, 200, { ok: true, url: finalUrl, title, ...result });
 }
 
@@ -417,6 +649,8 @@ const server = createServer(async (req, res) => {
 
     const routeMap = {
       "GET /api/tabs": handleTabs,
+      "GET /api/network": handleNetwork,
+      "POST /api/network/clear": handleNetworkClear,
       "POST /api/navigate": handleNavigate,
       "POST /api/eval": handleEval,
       "GET /api/snapshot": handleSnapshot,
