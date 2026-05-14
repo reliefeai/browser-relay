@@ -161,8 +161,7 @@ function scheduleReconnect() {
       await ensureRelayConnection()
       reconnectAttempt = 0
       console.log('Reconnected successfully')
-      await reannounceAttachedTabs()
-      await autoAttachAllTabs()
+      await recoverRelaySession()
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.warn(`Reconnect attempt ${reconnectAttempt} failed: ${message}`)
@@ -198,6 +197,11 @@ async function reannounceAttachedTabs() {
     } catch { setBadge(tabId, 'on') }
   }
   await persistState()
+}
+
+async function recoverRelaySession() {
+  await reannounceAttachedTabs()
+  await autoAttachAllTabs()
 }
 
 function sendToRelay(payload) {
@@ -340,7 +344,7 @@ async function connectOrToggle() {
   cancelReconnect()
   try {
     await ensureRelayConnection()
-    await autoAttachAllTabs()
+    await recoverRelaySession()
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.warn('Connect failed:', message)
@@ -571,7 +575,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (!relayWs || relayWs.readyState !== WebSocket.OPEN) {
     if (!relayConnectPromise && !reconnectTimer) {
       console.log('Keepalive: WebSocket unhealthy, triggering reconnect')
-      await ensureRelayConnection().catch(() => { if (!reconnectTimer) scheduleReconnect() })
+      try {
+        await ensureRelayConnection()
+        await recoverRelaySession()
+      } catch {
+        if (!reconnectTimer) scheduleReconnect()
+      }
     }
   }
 })
@@ -625,7 +634,7 @@ const initPromise = rehydrateState()
 initPromise.then(() => {
   ensureRelayConnection().then(() => {
     reconnectAttempt = 0
-    return reannounceAttachedTabs().then(() => autoAttachAllTabs())
+    return recoverRelaySession()
   }).catch(() => { scheduleReconnect() })
 })
 
