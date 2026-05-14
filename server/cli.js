@@ -150,7 +150,7 @@ function info() {
 }
 
 function help() {
-  console.log(`browser-relay — universal browser control for AI agents
+  console.log(`browser-relay - universal browser control for AI agents
 
 Usage:
   browser-relay [command]
@@ -198,7 +198,7 @@ async function version() {
 }
 
 const BOOLEAN_FLAGS = new Set([
-  "base64", "clear", "double", "doubleClick", "fullPage", "json",
+  "base64", "clear", "double", "doubleClick", "exact", "fullPage", "json",
   "raw", "stdin", "submit",
 ]);
 
@@ -318,6 +318,21 @@ function parseJsonOption(value, label) {
   }
 }
 
+function locatorFromFlags(flags, fallbackSelector, options = {}) {
+  const { allowTextFlag = false } = options;
+  const locator = {};
+  const selector = flagValue(flags, "selector") || fallbackSelector;
+  const text = flagValue(flags, "locator-text", "locatorText") || (allowTextFlag ? flagValue(flags, "text") : undefined);
+  const role = flagValue(flags, "role");
+  const name = flagValue(flags, "name");
+  if (selector) locator.selector = String(selector);
+  if (text) locator.text = String(text);
+  if (role) locator.role = String(role);
+  if (name) locator.name = String(name);
+  if (flagBool(flags, "exact")) locator.exact = true;
+  return Object.keys(locator).length ? locator : undefined;
+}
+
 async function relayRequest(method, path, body) {
   const url = `${RELAY_URL}${path}`;
   const options = { method, headers: { "Content-Type": "application/json" } };
@@ -377,8 +392,13 @@ function printFrames(data, json) {
   }
 }
 
-function ensureOk(data) {
-  if (data?.ok === false) throw new Error(data.error || "Command failed");
+function ensureOk(data, json = false) {
+  if (data?.ok !== false) return;
+  if (json) {
+    printData(data, true);
+    process.exit(1);
+  }
+  throw new Error(data.error || data.code || "Command failed");
 }
 
 async function browserApiCommand(cmd, args) {
@@ -404,7 +424,7 @@ async function browserApiCommand(cmd, args) {
     case "open": {
       const url = requireValue(flagValue(flags, "url") || positional[0], "url is required");
       const data = await relayRequest("POST", "/api/navigate", { url, tabId: tabIdFrom(flags) });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log(`${data.title || "(untitled)"}\n${data.url || url}`);
       return;
@@ -417,36 +437,38 @@ async function browserApiCommand(cmd, args) {
       addParam(params, "maxLength", flagValue(flags, "max-length", "maxLength"));
       const qs = params.toString();
       const data = await relayRequest("GET", `/api/snapshot${qs ? `?${qs}` : ""}`);
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log(data.html ?? data.snapshot ?? "");
       return;
     }
     case "click": {
-      const selector = requireValue(flagValue(flags, "selector") || positional.join(" "), "selector is required");
+      const locator = locatorFromFlags(flags, positional.join(" "), { allowTextFlag: true });
+      requireValue(locator, "selector or locator is required");
       const data = await relayRequest("POST", "/api/click", {
-        selector,
+        locator,
         tabId: tabIdFrom(flags),
         frameId: frameIdFrom(flags),
         doubleClick: flagBool(flags, "double", "double-click", "doubleClick"),
         button: flagValue(flags, "button"),
       });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
-      console.log(`Clicked: ${data.elementText || selector}`);
+      console.log(`Clicked: ${data.elementText || JSON.stringify(locator)}`);
       return;
     }
     case "type": {
       const text = readInput(flags, positional, "text", "text");
+      const locator = locatorFromFlags(flags, flagValue(flags, "selector"));
       const data = await relayRequest("POST", "/api/type", {
         text,
-        selector: flagValue(flags, "selector"),
+        locator,
         tabId: tabIdFrom(flags),
         frameId: frameIdFrom(flags),
         clear: flagBool(flags, "clear"),
         submit: flagBool(flags, "submit"),
       });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log("Typed.");
       return;
@@ -460,7 +482,7 @@ async function browserApiCommand(cmd, args) {
         tabId: tabIdFrom(flags),
         frameId: frameIdFrom(flags),
       });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log(`Scrolled: ${data.direction || direction}`);
       return;
@@ -471,7 +493,7 @@ async function browserApiCommand(cmd, args) {
       addParam(params, "tabId", tabIdFrom(flags));
       if (flagBool(flags, "full-page", "fullPage")) params.set("fullPage", "true");
       const data = await relayRequest("GET", `/api/screenshot?${params.toString()}`);
-      ensureOk(data);
+      ensureOk(data, json);
       const buf = Buffer.from(data.data || "", "base64");
       if (json) return printData({ ...data, bytes: buf.length }, true);
       if (flagBool(flags, "base64")) {
@@ -490,7 +512,7 @@ async function browserApiCommand(cmd, args) {
     case "eval": {
       const expression = readInput(flags, positional, "expression", "expression");
       const data = await relayRequest("POST", "/api/eval", { expression, tabId: tabIdFrom(flags), frameId: frameIdFrom(flags) });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       if (data.exceptionDetails) {
         console.error(JSON.stringify(data.exceptionDetails, null, 2));
@@ -506,18 +528,21 @@ async function browserApiCommand(cmd, args) {
       return;
     }
     case "download": {
-      const selector = requireValue(flagValue(flags, "selector") || positional.join(" "), "selector is required");
-      const data = await relayRequest("POST", "/api/download", { selector, tabId: tabIdFrom(flags), frameId: frameIdFrom(flags) });
-      ensureOk(data);
+      const locator = locatorFromFlags(flags, positional.join(" "), { allowTextFlag: true });
+      requireValue(locator, "selector or locator is required");
+      const data = await relayRequest("POST", "/api/download", { locator, tabId: tabIdFrom(flags), frameId: frameIdFrom(flags) });
+      ensureOk(data, json);
       if (json) return printData(data, true);
-      if (!data.found) throw new Error(`Element not found: ${selector}`);
+      if (!data.found) throw new Error(`Element not found: ${JSON.stringify(locator)}`);
       console.log(data.url || "");
       return;
     }
     case "wait": {
       const selector = flagValue(flags, "selector") || positional[0];
+      const locator = locatorFromFlags(flags, selector);
       const data = await relayRequest("POST", "/api/wait", {
-        selector,
+        selector: locator && Object.keys(locator).length === 1 && locator.selector ? locator.selector : undefined,
+        locator: locator && !(Object.keys(locator).length === 1 && locator.selector) ? locator : undefined,
         text: flagValue(flags, "text"),
         url: flagValue(flags, "url"),
         urlRegex: flagValue(flags, "url-regex", "urlRegex"),
@@ -528,7 +553,7 @@ async function browserApiCommand(cmd, args) {
         tabId: tabIdFrom(flags),
         frameId: frameIdFrom(flags),
       });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log(`Matched in ${data.elapsedMs}ms.`);
       return;
@@ -544,7 +569,7 @@ async function browserApiCommand(cmd, args) {
         tabId: tabIdFrom(flags),
         sessionId: flagValue(flags, "session", "session-id", "sessionId"),
       });
-      ensureOk(data);
+      ensureOk(data, json);
       return printData(data, true);
     }
     default:
@@ -573,6 +598,10 @@ Common flags:
   --frame <id>                 Target frame id from 'browser-relay frames'
   --json, -j                   Print JSON response
   --selector, -s <css>         Selector for click/type/download
+  --role <role>                Lightweight locator role (button/link/textbox)
+  --name <name>                Lightweight locator accessible name
+  --locator-text <text>        Lightweight locator visible text
+  --exact                      Require exact name/text locator match
   --stdin                      Read text/expression from stdin
 
 Examples:
@@ -581,8 +610,11 @@ Examples:
   browser-relay snapshot --tab ABC123 --max-length 20000
   browser-relay snapshot --tab ABC123 --frame FRAME123
   browser-relay click 'button[type=submit]'
+  browser-relay click --role button --name Save --exact
   browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+  browser-relay type 'hello world' --role textbox --name Search --clear
   browser-relay wait --selector '#done' --visible --timeout 10000
+  browser-relay wait --role button --name Save --visible --timeout 10000
   browser-relay cdp Runtime.evaluate --params '{"expression":"document.title","returnByValue":true}'
   browser-relay screenshot /tmp/page.png --full-page
   browser-relay eval --stdin < script.js

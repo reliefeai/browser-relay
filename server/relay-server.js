@@ -275,15 +275,126 @@ function runtimeExceptionMessage(result) {
   return details.exception?.description || details.text || "JavaScript evaluation failed";
 }
 
+function normalizeLocator(input) {
+  if (!input) return null;
+  const raw = typeof input === "string" ? { selector: input } : input;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const locator = {};
+  for (const key of ["selector", "text", "role", "name"]) {
+    if (typeof raw[key] === "string" && raw[key].trim()) locator[key] = raw[key].trim();
+  }
+  if (raw.exact === true) locator.exact = true;
+  return Object.keys(locator).length ? locator : null;
+}
+
+function locatorFromBody(body, options = {}) {
+  const { allowText = false, allowLocatorText = true } = options;
+  const locator = normalizeLocator(body.locator);
+  if (locator) return locator;
+  const direct = {
+    selector: body.selector,
+    text: allowText ? body.text : undefined,
+    role: body.role,
+    name: body.name,
+    exact: body.exact,
+  };
+  if (allowLocatorText && typeof body.locatorText === "string") direct.text = body.locatorText;
+  return normalizeLocator(direct);
+}
+
+function locatorDescription(locator) {
+  if (!locator) return "element";
+  const parts = [];
+  for (const key of ["selector", "role", "name", "text"]) {
+    if (locator[key]) parts.push(`${key}=${JSON.stringify(locator[key])}`);
+  }
+  if (locator.exact) parts.push("exact=true");
+  return parts.length ? parts.join(" ") : "element";
+}
+
+function elementNotFound(locator, frameId) {
+  return {
+    ok: false,
+    code: "element_not_found",
+    error: `Element not found: ${locatorDescription(locator)}`,
+    locator,
+    frameId,
+  };
+}
+
+function elementResolverExpression(locator, foundExpression) {
+  return `(function() {
+    var locator = ${JSON.stringify(locator)};
+    function normalize(value) {
+      return String(value || '').replace(/\\s+/g, ' ').trim();
+    }
+    function includesOrEquals(value, expected, exact) {
+      value = normalize(value).toLowerCase();
+      expected = normalize(expected).toLowerCase();
+      if (!expected) return true;
+      return exact ? value === expected : value.includes(expected);
+    }
+    function implicitRole(el) {
+      var tag = el.tagName ? el.tagName.toLowerCase() : '';
+      var type = (el.getAttribute('type') || '').toLowerCase();
+      if (tag === 'a' && el.hasAttribute('href')) return 'link';
+      if (tag === 'button') return 'button';
+      if (tag === 'textarea') return 'textbox';
+      if (tag === 'select') return 'combobox';
+      if (tag === 'option') return 'option';
+      if (tag === 'input') {
+        if (['button', 'submit', 'reset'].includes(type)) return 'button';
+        if (type === 'checkbox') return 'checkbox';
+        if (type === 'radio') return 'radio';
+        return 'textbox';
+      }
+      if (/^h[1-6]$/.test(tag)) return 'heading';
+      return '';
+    }
+    function elementRole(el) {
+      return normalize(el.getAttribute('role') || implicitRole(el)).toLowerCase();
+    }
+    function elementName(el) {
+      return normalize(
+        el.getAttribute('aria-label') ||
+        el.getAttribute('title') ||
+        el.getAttribute('alt') ||
+        el.getAttribute('placeholder') ||
+        el.value ||
+        el.innerText ||
+        el.textContent
+      );
+    }
+    function elementText(el) {
+      return normalize(el.innerText || el.textContent || el.value || el.getAttribute('aria-label'));
+    }
+    function matches(el) {
+      if (!el) return false;
+      if (locator.role && elementRole(el) !== normalize(locator.role).toLowerCase()) return false;
+      if (locator.name && !includesOrEquals(elementName(el), locator.name, locator.exact)) return false;
+      if (locator.text && !includesOrEquals(elementText(el), locator.text, locator.exact)) return false;
+      return true;
+    }
+    var candidates = [];
+    if (locator.selector) {
+      try { candidates = Array.from(document.querySelectorAll(locator.selector)); }
+      catch (err) { return JSON.stringify({ found: false, selectorError: err.message || String(err), locator: locator }); }
+    } else {
+      candidates = Array.from(document.querySelectorAll('a,button,input,textarea,select,option,[role],[aria-label],[contenteditable],label,h1,h2,h3,h4,h5,h6'));
+    }
+    var el = candidates.find(matches) || null;
+    ${foundExpression}
+  })()`;
+}
+
 function hasWaitCondition(body) {
-  return ["selector", "text", "url", "urlRegex", "expression"]
+  return !!locatorFromBody(body) || ["text", "url", "urlRegex", "expression"]
     .some((key) => typeof body[key] === "string" && body[key]);
 }
 
-async function findElement(sessionId, selector, frameId) {
-  const findJs = `(function() {
-    var el = document.querySelector(${JSON.stringify(selector)});
-    if (!el) return JSON.stringify({ found: false });
+async function findElement(sessionId, locator, frameId) {
+  const findJs = elementResolverExpression(locator, `
+    if (!el) return JSON.stringify({ found: false, locator: locator });
     var rect = el.getBoundingClientRect();
     return JSON.stringify({
       found: true,
@@ -292,9 +403,10 @@ async function findElement(sessionId, selector, frameId) {
       width: rect.width,
       height: rect.height,
       tag: el.tagName,
+      role: el.getAttribute('role') || '',
       text: (el.innerText || el.textContent || el.value || '').trim().slice(0, 100)
     });
-  })()`;
+  `);
   const result = await evaluateInFrame(sessionId, findJs, { frameId });
   const info = parseJsonString(result?.result?.value, { found: false });
   if (!info.found) return info;
@@ -315,9 +427,12 @@ async function scrollFrameIntoView(sessionId, frameId) {
   }
 }
 
-async function scrollElementIntoView(sessionId, selector, frameId) {
+async function scrollElementIntoView(sessionId, locator, frameId) {
   await scrollFrameIntoView(sessionId, frameId);
-  const js = `document.querySelector(${JSON.stringify(selector)})?.scrollIntoView({ block: 'center', inline: 'center' })`;
+  const js = elementResolverExpression(locator, `
+    if (el) el.scrollIntoView({ block: 'center', inline: 'center' });
+    return JSON.stringify({ found: !!el });
+  `);
   await evaluateInFrame(sessionId, js, { frameId }).catch(() => {});
 }
 
@@ -406,20 +521,20 @@ async function handleSnapshot(req, res) {
 async function handleClick(req, res) {
   await ensureExtension();
   const body = await readBody(req);
-  const selector = body.selector;
-  if (!selector || typeof selector !== "string") return errorResponse(res, 400, "selector is required");
+  const locator = locatorFromBody(body, { allowText: true });
+  if (!locator) return errorResponse(res, 400, "selector or locator is required");
   const sessionId = resolveTab(body.tabId);
   const frameId = body.frameId;
 
-  const elInfo = await findElement(sessionId, selector, frameId);
-  if (!elInfo.found) return jsonResponse(res, 200, { ok: false, error: `Element not found: ${selector}` });
+  const elInfo = await findElement(sessionId, locator, frameId);
+  if (!elInfo.found) return jsonResponse(res, 200, elementNotFound(locator, frameId));
 
   const button = body.button || "left";
   const clickCount = body.doubleClick ? 2 : 1;
 
-  await scrollElementIntoView(sessionId, selector, frameId);
+  await scrollElementIntoView(sessionId, locator, frameId);
 
-  const elInfo2 = await findElement(sessionId, selector, frameId);
+  const elInfo2 = await findElement(sessionId, locator, frameId);
   const fx = Math.round(elInfo2.found ? elInfo2.x : elInfo.x);
   const fy = Math.round(elInfo2.found ? elInfo2.y : elInfo.y);
 
@@ -427,7 +542,7 @@ async function handleClick(req, res) {
   await sendToExtension("Input.dispatchMouseEvent", { type: "mousePressed", x: fx, y: fy, button, clickCount }, sessionId);
   await sendToExtension("Input.dispatchMouseEvent", { type: "mouseReleased", x: fx, y: fy, button, clickCount }, sessionId);
 
-  jsonResponse(res, 200, { ok: true, clicked: true, elementText: elInfo2.text || elInfo.text || "", selector, frameId });
+  jsonResponse(res, 200, { ok: true, clicked: true, elementText: elInfo2.text || elInfo.text || "", locator, frameId });
 }
 
 async function handleType(req, res) {
@@ -436,16 +551,15 @@ async function handleType(req, res) {
   const text = body.text;
   if (typeof text !== "string") return errorResponse(res, 400, "text is required");
   const sessionId = resolveTab(body.tabId);
-  const selector = body.selector;
+  const locator = locatorFromBody(body);
   const frameId = body.frameId;
   const submit = body.submit || false;
   const clear = body.clear || false;
 
-  if (selector) {
-    await scrollElementIntoView(sessionId, selector, frameId);
-    const focusJs = `(function() {
-      var el = document.querySelector(${JSON.stringify(selector)});
-      if (!el) return JSON.stringify({ found: false });
+  if (locator) {
+    await scrollElementIntoView(sessionId, locator, frameId);
+    const focusJs = elementResolverExpression(locator, `
+      if (!el) return JSON.stringify({ found: false, locator: locator });
       el.focus({ preventScroll: false });
       if (${clear ? "true" : "false"}) {
         if (el.isContentEditable) {
@@ -466,13 +580,13 @@ async function handleType(req, res) {
         el.dispatchEvent(new Event('change', { bubbles: true }));
       }
       return JSON.stringify({ found: true, tag: el.tagName, type: el.type || '', contentEditable: !!el.isContentEditable });
-    })()`;
+    `);
     const focusResult = await evaluateInFrame(sessionId, focusJs, { frameId });
     const info = parseJsonString(focusResult?.result?.value, { found: false });
-    if (!info.found) return jsonResponse(res, 200, { ok: false, error: `Element not found: ${selector}` });
+    if (!info.found) return jsonResponse(res, 200, elementNotFound(locator, frameId));
   }
 
-  if (clear && !selector) {
+  if (clear && !locator) {
     await sendToExtension("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", modifiers: 2 }, sessionId);
     await sendToExtension("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers: 2 }, sessionId);
     await sendToExtension("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace" }, sessionId);
@@ -486,7 +600,7 @@ async function handleType(req, res) {
     await sendToExtension("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }, sessionId);
   }
 
-  jsonResponse(res, 200, { ok: true, typed: true, frameId });
+  jsonResponse(res, 200, { ok: true, typed: true, locator, frameId });
 }
 
 async function handleScreenshot(req, res) {
@@ -519,38 +633,39 @@ async function handleScroll(req, res) {
 async function handleDownload(req, res) {
   await ensureExtension();
   const body = await readBody(req);
-  const selector = body.selector;
-  if (!selector || typeof selector !== "string") return errorResponse(res, 400, "selector is required (e.g. 'img[src=...]' or 'a[href=...]')");
+  const locator = locatorFromBody(body, { allowText: true });
+  if (!locator) return errorResponse(res, 400, "selector or locator is required (e.g. 'img[src=...]', 'a[href=...]', or {\"role\":\"link\",\"name\":\"Download\"})");
   const sessionId = resolveTab(body.tabId);
   const frameId = body.frameId;
-  const result = await evaluateInFrame(sessionId, `(function() {
-    var el = document.querySelector(${JSON.stringify(selector)});
-    if (!el) return JSON.stringify({ found: false });
+  const result = await evaluateInFrame(sessionId, elementResolverExpression(locator, `
+    if (!el) return JSON.stringify({ found: false, locator: locator });
     var url = el.src || el.href || '';
     var tag = el.tagName;
     return JSON.stringify({ found: true, url, tag });
-  })()`, { frameId });
+  `), { frameId });
   const data = parseJsonString(result?.result?.value, { found: false });
-  jsonResponse(res, 200, { ok: true, ...data, frameId });
+  if (!data.found) return jsonResponse(res, 200, elementNotFound(locator, frameId));
+  jsonResponse(res, 200, { ok: true, ...data, locator, frameId });
 }
 
 async function checkWaitCondition(sessionId, body) {
   const frameId = body.frameId;
   const checks = [];
+  const locator = locatorFromBody(body);
 
-  if (typeof body.selector === "string" && body.selector) {
+  if (locator) {
     const visible = body.visible === true;
+    const kind = locator.selector && !locator.text && !locator.role && !locator.name ? "selector" : "locator";
     checks.push({
-      kind: "selector",
+      kind,
       run: async () => {
-        const js = `(function() {
-          var el = document.querySelector(${JSON.stringify(body.selector)});
-          if (!el) return JSON.stringify({ matched: false, found: false });
+        const js = elementResolverExpression(locator, `
+          if (!el) return JSON.stringify({ matched: false, found: false, locator: locator });
           var rect = el.getBoundingClientRect();
           var style = window.getComputedStyle(el);
           var visible = !!(rect.width || rect.height) && style.visibility !== 'hidden' && style.display !== 'none';
-          return JSON.stringify({ matched: ${visible ? "visible" : "true"}, found: true, visible: visible, text: (el.innerText || el.textContent || el.value || '').trim().slice(0, 200) });
-        })()`;
+          return JSON.stringify({ matched: ${visible ? "visible" : "true"}, found: true, visible: visible, locator: locator, text: (el.innerText || el.textContent || el.value || '').trim().slice(0, 200) });
+        `);
         const result = await evaluateInFrame(sessionId, js, { frameId });
         return parseJsonString(result?.result?.value, { matched: false });
       },

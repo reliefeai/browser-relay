@@ -162,8 +162,11 @@ browser-relay frames --tab ABC123
 browser-relay snapshot --tab ABC123 --max-length 20000
 browser-relay snapshot --tab ABC123 --frame FRAME123
 browser-relay click 'button[type=submit]' --tab ABC123
+browser-relay click --role button --name 'Save' --exact
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --frame FRAME123
+browser-relay type 'hello world' --role textbox --name Search --clear
 browser-relay wait --selector '#done' --visible --timeout 10000
+browser-relay wait --role button --name Save --visible --timeout 10000
 browser-relay scroll down --amount 1000
 browser-relay screenshot /tmp/page.png --full-page
 browser-relay eval 'document.title'
@@ -178,6 +181,8 @@ browser-relay eval --stdin < script.js
 ```
 
 All browser commands accept `--json` for the raw API response and `--tab <id>` to target a specific tab. `snapshot`, `click`, `type`, `scroll`, `eval`, `wait`, and `download` also accept `--frame <id>` from `browser-relay frames`.
+
+Element commands accept CSS selectors and a lightweight locator form. Use `--role`, `--name`, `--locator-text`, and `--exact` when a stable CSS selector is unavailable. This is intentionally a pragmatic approximation of accessible locators, not a full Playwright locator engine.
 
 Agent guidance: prefer the CLI for browser interaction. Use the HTTP API when
 you are writing code, tests, or an integration against Browser Relay, or when a
@@ -204,6 +209,11 @@ curl -X POST http://127.0.0.1:18795/api/click \
   -H "Content-Type: application/json" \
   -d '{"tabId":"ABC123","frameId":"FRAME123","selector":"button.submit"}'
 
+# Click by lightweight locator
+curl -X POST http://127.0.0.1:18795/api/click \
+  -H "Content-Type: application/json" \
+  -d '{"tabId":"ABC123","locator":{"role":"button","name":"Save","exact":true}}'
+
 # Wait for a selector
 curl -X POST http://127.0.0.1:18795/api/wait \
   -H "Content-Type: application/json" \
@@ -218,14 +228,14 @@ curl -X POST http://127.0.0.1:18795/api/wait \
 | `/api/navigate` | POST | Navigate an attached tab |
 | `/api/frames` | GET | List frame tree for a tab |
 | `/api/snapshot` | GET | Get annotated text or raw HTML |
-| `/api/click` | POST | Click an element by CSS selector |
-| `/api/type` | POST | Type into an input |
+| `/api/click` | POST | Click an element by CSS selector or locator |
+| `/api/type` | POST | Type into the focused element or a locator |
 | `/api/scroll` | POST | Scroll the page |
 | `/api/screenshot` | GET/POST | Capture a PNG screenshot |
 | `/api/eval` | POST | Evaluate JavaScript in the page |
-| `/api/wait` | POST | Wait for selector, text, URL, or expression |
+| `/api/wait` | POST | Wait for selector, locator, text, URL, or expression |
 | `/api/cdp` | POST | Send a raw CDP command from loopback clients |
-| `/api/download` | POST | Extract an element URL |
+| `/api/download` | POST | Extract an element URL by selector or locator |
 
 ## CLI
 
@@ -244,7 +254,7 @@ browser-relay uninstall  # Unregister the background service
 browser-relay tabs       # List attached browser tabs
 browser-relay frames     # List frames in a tab
 browser-relay snapshot   # Print annotated page text
-browser-relay click      # Click an element by CSS selector
+browser-relay click      # Click an element by CSS selector or locator
 browser-relay type       # Type text into the page
 browser-relay scroll     # Scroll the page
 browser-relay screenshot # Save a PNG screenshot

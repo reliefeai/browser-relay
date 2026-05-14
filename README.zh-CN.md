@@ -146,8 +146,11 @@ browser-relay frames --tab ABC123
 browser-relay snapshot --tab ABC123 --max-length 20000
 browser-relay snapshot --tab ABC123 --frame FRAME123
 browser-relay click 'button[type=submit]' --tab ABC123
+browser-relay click --role button --name 'Save' --exact
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --frame FRAME123
+browser-relay type 'hello world' --role textbox --name Search --clear
 browser-relay wait --selector '#done' --visible --timeout 10000
+browser-relay wait --role button --name Save --visible --timeout 10000
 browser-relay scroll down --amount 1000
 browser-relay screenshot /tmp/page.png --full-page
 browser-relay eval 'document.title'
@@ -162,6 +165,8 @@ browser-relay eval --stdin < script.js
 ```
 
 所有浏览器操作命令都支持 `--json` 输出原始 API 响应，也支持 `--tab <id>` 指定标签页。
+
+元素命令支持 CSS selector，也支持轻量 locator：`--role`、`--name`、`--locator-text`、`--exact`。这只是面向 Agent 的实用近似，不是完整 Playwright locator 引擎。
 
 Agent 使用规则：浏览器交互默认使用 CLI。只有在编写代码、测试、集成
 Browser Relay，或者当前环境没有 CLI 时，才直接使用 HTTP API。
@@ -181,6 +186,10 @@ curl -X POST http://127.0.0.1:18795/api/click \
   -H "Content-Type: application/json" \
   -d '{"tabId":"ABC123","frameId":"FRAME123","selector":"button.submit"}'
 
+curl -X POST http://127.0.0.1:18795/api/click \
+  -H "Content-Type: application/json" \
+  -d '{"tabId":"ABC123","locator":{"role":"button","name":"Save","exact":true}}'
+
 curl -X POST http://127.0.0.1:18795/api/wait \
   -H "Content-Type: application/json" \
   -d '{"tabId":"ABC123","selector":"#done","visible":true}'
@@ -196,14 +205,14 @@ curl -X POST http://127.0.0.1:18795/api/wait \
 | `/api/navigate` | POST | 导航已附加标签页 |
 | `/api/frames` | GET | 列出标签页 frame tree |
 | `/api/snapshot` | GET | 获取页面文本快照或 HTML |
-| `/api/click` | POST | 按 CSS selector 点击元素 |
-| `/api/type` | POST | 输入文本 |
+| `/api/click` | POST | 按 CSS selector 或 locator 点击元素 |
+| `/api/type` | POST | 向焦点或 locator 输入文本 |
 | `/api/scroll` | POST | 滚动页面 |
 | `/api/screenshot` | GET/POST | 获取 PNG 截图 |
 | `/api/eval` | POST | 执行页面内 JavaScript |
-| `/api/wait` | POST | 等待 selector、文本、URL 或表达式 |
+| `/api/wait` | POST | 等待 selector、locator、文本、URL 或表达式 |
 | `/api/cdp` | POST | 从 loopback 客户端发送原始 CDP 命令 |
-| `/api/download` | POST | 获取元素 URL |
+| `/api/download` | POST | 按 selector 或 locator 获取元素 URL |
 
 ## CLI
 
@@ -222,7 +231,7 @@ browser-relay uninstall  # 卸载后台服务
 browser-relay tabs       # 列出已附加标签页
 browser-relay frames     # 列出标签页 frames
 browser-relay snapshot   # 输出页面结构化文本
-browser-relay click      # 按 CSS selector 点击元素
+browser-relay click      # 按 CSS selector 或 locator 点击元素
 browser-relay type       # 输入文本
 browser-relay scroll     # 滚动页面
 browser-relay screenshot # 保存 PNG 截图

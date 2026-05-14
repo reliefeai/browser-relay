@@ -36,6 +36,17 @@ function addQueryParam(params, name, value) {
   if (value !== undefined && value !== null && value !== "") params.set(name, String(value));
 }
 
+const LOCATOR_SCHEMA = {
+  type: "object",
+  properties: {
+    selector: { type: "string", description: "CSS selector to narrow or find the element" },
+    text: { type: "string", description: "Visible text to match" },
+    role: { type: "string", description: "Approximate ARIA or implicit role, e.g. button, link, textbox" },
+    name: { type: "string", description: "Approximate accessible name, aria-label, placeholder, title, value, or text" },
+    exact: { type: "boolean", description: "Require exact text/name match instead of substring match" },
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Tool definitions
 // ---------------------------------------------------------------------------
@@ -99,28 +110,29 @@ const TOOLS = [
   },
   {
     name: "browser_click",
-    description: "Click an element on the page by CSS selector. Scrolls the element into view first. Returns the text of the clicked element.",
+    description: "Click an element on the page by CSS selector or locator. Scrolls the element into view first. Returns the text of the clicked element.",
     inputSchema: {
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector for the element to click (e.g. 'button.submit', 'a[href=\"...\"]')" },
+        locator: LOCATOR_SCHEMA,
         tabId: { type: "string", description: "Tab targetId (optional)" },
         frameId: { type: "string", description: "Frame id from browser_frames (optional)" },
         button: { type: "string", enum: ["left", "middle", "right"], description: "Mouse button (default: left)" },
         doubleClick: { type: "boolean", description: "Double-click instead of single click" },
       },
-      required: ["selector"],
     },
     handler: async (args) => relayPost("/api/click", args),
   },
   {
     name: "browser_type",
-    description: "Type text into an input field. Optionally focus an element by CSS selector first. Can clear the field and/or press Enter to submit.",
+    description: "Type text into an input field. Optionally focus an element by CSS selector or locator first. Can clear the field and/or press Enter to submit.",
     inputSchema: {
       type: "object",
       properties: {
         text: { type: "string", description: "Text to type" },
         selector: { type: "string", description: "CSS selector to focus before typing (optional)" },
+        locator: LOCATOR_SCHEMA,
         submit: { type: "boolean", description: "Press Enter after typing" },
         clear: { type: "boolean", description: "Clear the field before typing" },
         tabId: { type: "string", description: "Tab targetId (optional)" },
@@ -173,12 +185,13 @@ const TOOLS = [
   },
   {
     name: "browser_wait",
-    description: "Wait for a selector, text, URL substring/regex, or JavaScript expression to become true. Supports frameId for iframe waits.",
+    description: "Wait for a selector, locator, text, URL substring/regex, or JavaScript expression to become true. Supports frameId for iframe waits.",
     inputSchema: {
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector to wait for" },
-        visible: { type: "boolean", description: "Require selector to be visible" },
+        locator: LOCATOR_SCHEMA,
+        visible: { type: "boolean", description: "Require selector or locator to be visible" },
         text: { type: "string", description: "Text that must appear in document body" },
         url: { type: "string", description: "URL substring that must appear in location.href" },
         urlRegex: { type: "string", description: "Regular expression that must match location.href" },
@@ -213,10 +226,10 @@ const TOOLS = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector to find the element (e.g. 'img', 'a.download-link')" },
+        locator: LOCATOR_SCHEMA,
         tabId: { type: "string", description: "Tab targetId (optional)" },
         frameId: { type: "string", description: "Frame id from browser_frames (optional)" },
       },
-      required: ["selector"],
     },
     handler: async (args) => relayPost("/api/download", args),
   },

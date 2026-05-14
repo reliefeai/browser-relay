@@ -53,8 +53,11 @@ browser-relay frames --tab <tabId>
 browser-relay snapshot --tab <tabId> --max-length 20000
 browser-relay snapshot --tab <tabId> --frame <frameId>
 browser-relay click 'button[type=submit]' --tab <tabId>
+browser-relay click --role button --name 'Save' --exact --tab <tabId>
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --tab <tabId> --frame <frameId>
+browser-relay type 'hello world' --role textbox --name Search --clear --tab <tabId>
 browser-relay wait --selector '#done' --visible --timeout 10000 --tab <tabId>
+browser-relay wait --role button --name Save --visible --timeout 10000 --tab <tabId>
 browser-relay scroll down --amount 1000 --tab <tabId>
 browser-relay screenshot /tmp/page.png --full-page --tab <tabId>
 browser-relay eval 'document.title' --tab <tabId>
@@ -104,20 +107,27 @@ GET http://127.0.0.1:18795/api/frames?tabId=<id>
 Returns: `{ ok: true, frames: [{ id, parentId, name, url, depth }] }`
 
 ### 4. browser_click
-Click an element by CSS selector. Scrolls into view first, uses real mouse events.
+Click an element by CSS selector or lightweight locator. Scrolls into view first, uses real mouse events.
 ```
 POST http://127.0.0.1:18795/api/click
-Body: { "selector": "button.submit", "tabId?": "...", "doubleClick?": false }
+Body: {
+  "selector?": "button.submit",
+  "locator?": { "role?": "button", "name?": "Save", "text?": "Save", "exact?": true },
+  "tabId?": "...",
+  "frameId?": "...",
+  "doubleClick?": false
+}
 ```
 Pass `"frameId"` to click inside an iframe.
 
 ### 5. browser_type
-Type text into an input field. Optionally clear and submit.
+Type text into an input field. Optionally focus an element by CSS selector or locator first, clear, and submit.
 ```
 POST http://127.0.0.1:18795/api/type
 Body: {
   "text": "hello world",
   "selector?": "input[name='q']",
+  "locator?": { "role?": "textbox", "name?": "Search", "text?": "Query", "exact?": true },
   "clear?": true,
   "submit?": true,
   "tabId?": "..."
@@ -152,7 +162,7 @@ Pass `"frameId"` to evaluate in an iframe.
 Get the URL of an image/media/link element.
 ```
 POST http://127.0.0.1:18795/api/download
-Body: { "selector": "img.profile-pic", "tabId?": "..." }
+Body: { "selector?": "img.profile-pic", "locator?": { "role?": "link", "name?": "Download" }, "tabId?": "..." }
 ```
 Pass `"frameId"` to query inside an iframe.
 
@@ -162,6 +172,7 @@ Wait for page state.
 POST http://127.0.0.1:18795/api/wait
 Body: {
   "selector?": "#done",
+  "locator?": { "role?": "button", "name?": "Save", "exact?": true },
   "visible?": true,
   "text?": "Saved",
   "url?": "/dashboard",
@@ -173,6 +184,8 @@ Body: {
   "frameId?": "..."
 }
 ```
+
+Lightweight locators are pragmatic approximations for agent use. Prefer CSS when stable; use `role`, `name`, `text`, and `exact` when the page has no durable selector.
 
 ### 11. browser_cdp
 Advanced local escape hatch for Chrome DevTools Protocol commands.
