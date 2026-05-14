@@ -85,11 +85,16 @@ function waitForExtension(timeoutMs = 3_000) {
 // ---------------------------------------------------------------------------
 function sendToExtension(method, params, sessionId) {
   const ws = extensionWs;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Extension not connected"));
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    return Promise.reject(relayError("extension_not_connected", "Extension not connected", { status: 503, retryable: true }));
+  }
   const id = nextExtensionId++;
   const payload = { id, method: "forwardCDPCommand", params: { method, params, ...(sessionId ? { sessionId } : {}) } };
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { pendingCommands.delete(id); reject(new Error(`CDP command timeout: ${method}`)); }, COMMAND_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      pendingCommands.delete(id);
+      reject(relayError("cdp_timeout", `CDP command timeout: ${method}`, { status: 504, retryable: true, details: { method } }));
+    }, COMMAND_TIMEOUT_MS);
     pendingCommands.set(id, {
       resolve: (v) => { clearTimeout(timer); resolve(v); },
       reject: (e) => { clearTimeout(timer); reject(e); },
@@ -106,11 +111,11 @@ function sendToExtension(method, params, sessionId) {
 function resolveSession(targetId) {
   if (targetId) {
     for (const t of connectedTargets.values()) { if (t.targetId === targetId) return t.sessionId; }
-    throw new Error(`No attached tab with targetId: ${targetId}`);
+    throw relayError("tab_not_found", `No attached tab with targetId: ${targetId}`, { status: 404, details: { targetId } });
   }
   let last = null;
   for (const t of connectedTargets.values()) last = t;
-  if (!last) throw new Error("No attached tabs. Install the Browser Relay extension and open a tab.");
+  if (!last) throw relayError("no_attached_tabs", "No attached tabs. Install the Browser Relay extension and open a tab.", { status: 409, retryable: true });
   return last.sessionId;
 }
 
@@ -167,24 +172,105 @@ function jsonResponse(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) });
   res.end(payload);
 }
-function errorResponse(res, status, message) { jsonResponse(res, status, { ok: false, error: message }); }
+
+function relayError(code, message, options = {}) {
+  const err = new Error(message);
+  err.relayCode = code;
+  err.status = options.status;
+  err.details = options.details;
+  err.retryable = options.retryable;
+  return err;
+}
+
+function defaultCodeForStatus(status) {
+  if (status === 400) return "invalid_request";
+  if (status === 404) return "not_found";
+  if (status === 413) return "request_too_large";
+  if (status === 503) return "extension_not_connected";
+  if (status === 504) return "cdp_timeout";
+  return status >= 500 ? "internal_error" : "request_failed";
+}
+
+function errorPayload(code, message, options = {}) {
+  const payload = {
+    ok: false,
+    code,
+    error: message,
+    message,
+    status: options.status ?? 500,
+    retryable: options.retryable === true,
+  };
+  if (options.details !== undefined) payload.details = options.details;
+  return payload;
+}
+
+function normalizeError(err, fallbackStatus = 500) {
+  if (err && typeof err === "object" && err.relayCode) {
+    return errorPayload(err.relayCode, err.message || String(err), {
+      status: err.status || fallbackStatus,
+      retryable: err.retryable,
+      details: err.details,
+    });
+  }
+
+  const message = err instanceof Error ? err.message : String(err);
+  if (message === "Extension disconnected") {
+    return errorPayload("extension_disconnected", message, { status: 503, retryable: true });
+  }
+  if (message.startsWith("No attached tab with targetId: ")) {
+    const targetId = message.slice("No attached tab with targetId: ".length);
+    return errorPayload("tab_not_found", message, { status: 404, details: { targetId } });
+  }
+  if (message.startsWith("CDP command timeout: ")) {
+    const method = message.slice("CDP command timeout: ".length);
+    return errorPayload("cdp_timeout", message, { status: 504, retryable: true, details: { method } });
+  }
+  if (message.startsWith("Request body too large")) {
+    return errorPayload("request_too_large", message, { status: 413 });
+  }
+  if (message === "Invalid JSON in request body") {
+    return errorPayload("invalid_json", message, { status: 400 });
+  }
+  return errorPayload(defaultCodeForStatus(fallbackStatus), message, { status: fallbackStatus });
+}
+
+function errorResponse(res, status, message, options = {}) {
+  const code = options.code || defaultCodeForStatus(status);
+  jsonResponse(res, status, errorPayload(code, message, { ...options, status }));
+}
+
+function validationError(res, message, field) {
+  return errorResponse(res, 400, message, {
+    code: "invalid_request",
+    details: field ? { field } : undefined,
+  });
+}
+
+function elementNotFound(selector) {
+  return errorPayload("element_not_found", `Element not found: ${selector}`, {
+    status: 200,
+    details: { selector },
+  });
+}
 
 async function readBody(req) {
   const chunks = []; let totalSize = 0;
   for await (const chunk of req) {
     totalSize += chunk.length;
-    if (totalSize > MAX_BODY_SIZE) throw new Error("Request body too large (max 64KB)");
+    if (totalSize > MAX_BODY_SIZE) throw relayError("request_too_large", "Request body too large (max 64KB)", { status: 413 });
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf-8");
   if (!raw.trim()) return {};
-  try { return JSON.parse(raw); } catch { throw new Error("Invalid JSON in request body"); }
+  try { return JSON.parse(raw); } catch { throw relayError("invalid_json", "Invalid JSON in request body", { status: 400 }); }
 }
 
 async function ensureExtension() {
   if (extensionConnected()) return;
   const reconnected = await waitForExtension(3_000);
-  if (!reconnected || !extensionConnected()) { throw new Error("Extension not connected. Is the browser running with the extension?"); }
+  if (!reconnected || !extensionConnected()) {
+    throw relayError("extension_not_connected", "Extension not connected. Is the browser running with the extension?", { status: 503, retryable: true });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,10 +286,10 @@ async function handleTabs(_req, res) {
 }
 
 async function handleNavigate(req, res) {
-  await ensureExtension();
   const body = await readBody(req);
   const url = body.url;
-  if (!url || typeof url !== "string") return errorResponse(res, 400, "url is required");
+  if (!url || typeof url !== "string") return validationError(res, "url is required", "url");
+  await ensureExtension();
   const sessionId = resolveTab(body.tabId);
   const result = await sendToExtension("Page.navigate", { url }, sessionId);
   await new Promise((r) => setTimeout(r, 500));
@@ -218,10 +304,10 @@ async function handleNavigate(req, res) {
 }
 
 async function handleEval(req, res) {
-  await ensureExtension();
   const body = await readBody(req);
   const expression = body.expression;
-  if (!expression || typeof expression !== "string") return errorResponse(res, 400, "expression is required");
+  if (!expression || typeof expression !== "string") return validationError(res, "expression is required", "expression");
+  await ensureExtension();
   const sessionId = resolveTab(body.tabId);
   const returnByValue = body.returnByValue !== false;
   const result = await sendToExtension("Runtime.evaluate", { expression, returnByValue, awaitPromise: true }, sessionId);
@@ -259,16 +345,16 @@ async function handleSnapshot(req, res) {
 }
 
 async function handleClick(req, res) {
-  await ensureExtension();
   const body = await readBody(req);
   const selector = body.selector;
-  if (!selector || typeof selector !== "string") return errorResponse(res, 400, "selector is required");
+  if (!selector || typeof selector !== "string") return validationError(res, "selector is required", "selector");
+  await ensureExtension();
   const sessionId = resolveTab(body.tabId);
 
   const findJs = `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return JSON.stringify({ found: false }); var rect = el.getBoundingClientRect(); return JSON.stringify({ found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (el.innerText || el.textContent || '').trim().slice(0, 100) }); })()`;
   const findResult = await sendToExtension("Runtime.evaluate", { expression: findJs, returnByValue: true }, sessionId);
   const elInfo = JSON.parse(findResult?.result?.value || '{\"found\":false}');
-  if (!elInfo.found) return jsonResponse(res, 200, { ok: false, error: `Element not found: ${selector}` });
+  if (!elInfo.found) return jsonResponse(res, 200, elementNotFound(selector));
 
   const button = body.button || "left";
   const clickCount = body.doubleClick ? 2 : 1;
@@ -289,10 +375,10 @@ async function handleClick(req, res) {
 }
 
 async function handleType(req, res) {
-  await ensureExtension();
   const body = await readBody(req);
   const text = body.text;
-  if (typeof text !== "string") return errorResponse(res, 400, "text is required");
+  if (typeof text !== "string") return validationError(res, "text is required", "text");
+  await ensureExtension();
   const sessionId = resolveTab(body.tabId);
   const selector = body.selector;
   const submit = body.submit || false;
@@ -302,7 +388,7 @@ async function handleType(req, res) {
     const focusJs = `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return JSON.stringify({ found: false }); el.focus(); return JSON.stringify({ found: true }); })()`;
     const focusResult = await sendToExtension("Runtime.evaluate", { expression: focusJs, returnByValue: true }, sessionId);
     const info = JSON.parse(focusResult?.result?.value || '{\"found\":false}');
-    if (!info.found) return jsonResponse(res, 200, { ok: false, error: `Element not found: ${selector}` });
+    if (!info.found) return jsonResponse(res, 200, elementNotFound(selector));
   }
 
   if (clear) {
@@ -323,19 +409,19 @@ async function handleType(req, res) {
 }
 
 async function handleScreenshot(req, res) {
-  await ensureExtension();
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const body = req.method === "POST" ? await readBody(req) : {};
   const tabId = body.tabId || url.searchParams.get("tabId") || undefined;
   const fullPage = body.fullPage === true || url.searchParams.get("fullPage") === "true";
+  await ensureExtension();
   const sessionId = resolveTab(tabId);
   const result = await sendToExtension("Page.captureScreenshot", { format: "png", captureBeyondViewport: fullPage }, sessionId);
   jsonResponse(res, 200, { ok: true, data: result?.data || "", format: "png" });
 }
 
 async function handleScroll(req, res) {
-  await ensureExtension();
   const body = await readBody(req);
+  await ensureExtension();
   const sessionId = resolveTab(body.tabId);
   const direction = body.direction || "down";
   const amount = body.amount || 800;
@@ -349,16 +435,20 @@ async function handleScroll(req, res) {
 }
 
 async function handleDownload(req, res) {
-  await ensureExtension();
   const body = await readBody(req);
   const selector = body.selector;
-  if (!selector || typeof selector !== "string") return errorResponse(res, 400, "selector is required (e.g. 'img[src=...]' or 'a[href=...]')");
+  if (!selector || typeof selector !== "string") {
+    return validationError(res, "selector is required (e.g. 'img[src=...]' or 'a[href=...]')", "selector");
+  }
+  await ensureExtension();
   const sessionId = resolveTab(body.tabId);
   const result = await sendToExtension("Runtime.evaluate", {
     expression: `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return { found: false }; var url = el.src || el.href || ''; var tag = el.tagName; return { found: true, url, tag }; })()`,
     returnByValue: true,
   }, sessionId);
-  jsonResponse(res, 200, { ok: true, ...result?.result?.value });
+  const data = result?.result?.value || { found: false };
+  if (!data.found) return jsonResponse(res, 200, elementNotFound(selector));
+  jsonResponse(res, 200, { ok: true, ...data });
 }
 
 // ---------------------------------------------------------------------------
@@ -437,17 +527,21 @@ const server = createServer(async (req, res) => {
     if (handler) {
       try { await handler(req, res); }
       catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        LOG.error("api.error", { path, error: message });
-        errorResponse(res, 500, message);
+        const payload = normalizeError(err);
+        LOG.error("api.error", { path, code: payload.code, error: payload.message });
+        errorResponse(res, payload.status, payload.message, {
+          code: payload.code,
+          retryable: payload.retryable,
+          details: payload.details,
+        });
       }
       return;
     }
 
-    return errorResponse(res, 404, `Unknown API endpoint: ${path}`);
+    return errorResponse(res, 404, `Unknown API endpoint: ${path}`, { code: "endpoint_not_found", details: { path } });
   }
 
-  errorResponse(res, 404, "Not found");
+  errorResponse(res, 404, "Not found", { code: "not_found", details: { path } });
 });
 
 // ---------------------------------------------------------------------------
@@ -498,7 +592,11 @@ wss.on("connection", (ws, req) => {
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
     if (extensionWs !== ws) return;
     extensionWs = null;
-    for (const [id, pending] of pendingCommands) { clearTimeout(pending.timer); pending.reject(new Error("Extension disconnected")); pendingCommands.delete(id); }
+    for (const [id, pending] of pendingCommands) {
+      clearTimeout(pending.timer);
+      pending.reject(relayError("extension_disconnected", "Extension disconnected", { status: 503, retryable: true }));
+      pendingCommands.delete(id);
+    }
     scheduleGraceCleanup();
   });
 

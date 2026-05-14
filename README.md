@@ -209,6 +209,26 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/eval` | POST | Evaluate JavaScript in the page |
 | `/api/download` | POST | Extract an element URL |
 
+### Error responses
+
+HTTP and command-level failures return a stable JSON envelope:
+
+```json
+{
+  "ok": false,
+  "code": "element_not_found",
+  "error": "Element not found: button.submit",
+  "message": "Element not found: button.submit",
+  "status": 200,
+  "retryable": false,
+  "details": { "selector": "button.submit" }
+}
+```
+
+The top-level `error` string is kept for older clients. New integrations should
+branch on `code`; CLI commands print the same object with `--json`, and MCP
+tools mark these responses as `isError: true`.
+
 ## CLI
 
 ```bash

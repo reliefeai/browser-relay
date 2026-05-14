@@ -25,12 +25,55 @@ async function relayRequest(method, path, body) {
   const headers = { "Content-Type": "application/json" };
   const opts = { method, headers };
   if (body !== undefined && method !== "GET") opts.body = JSON.stringify(body);
-  const res = await fetch(url, opts);
-  return await res.json();
+  let res;
+  try {
+    res = await fetch(url, opts);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    const message = `Cannot reach Browser Relay at ${RELAY_URL}: ${detail}`;
+    throw relayToolError(errorPayload("relay_unreachable", message, { status: 0, retryable: true }));
+  }
+
+  const text = await res.text();
+  let data = text;
+  try { data = text ? JSON.parse(text) : null; } catch { /* keep text */ }
+
+  if (!res.ok) {
+    const payload = data && typeof data === "object"
+      ? data
+      : errorPayload("http_error", `HTTP ${res.status}`, { status: res.status });
+    throw relayToolError(payload);
+  }
+  if (data?.ok === false) throw relayToolError(data);
+  return data;
 }
 
 async function relayGet(path) { return relayRequest("GET", path); }
 async function relayPost(path, body) { return relayRequest("POST", path, body); }
+
+function errorPayload(code, message, options = {}) {
+  return {
+    ok: false,
+    code,
+    error: message,
+    message,
+    status: options.status ?? 500,
+    retryable: options.retryable === true,
+  };
+}
+
+function relayToolError(payload) {
+  const message = payload?.message || payload?.error || "Browser Relay request failed";
+  const err = new Error(payload?.code ? `${payload.code}: ${message}` : message);
+  err.payload = payload;
+  return err;
+}
+
+function toolErrorPayload(err) {
+  if (err?.payload) return err.payload;
+  const message = err instanceof Error ? err.message : String(err);
+  return errorPayload("mcp_tool_error", message);
+}
 
 // ---------------------------------------------------------------------------
 // Tool definitions
@@ -204,7 +247,7 @@ async function handleMessage(msg) {
       const result = await tool.handler(params?.arguments || {});
       return sendResult(id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] });
     } catch (err) {
-      return sendResult(id, { content: [{ type: "text", text: `Error: ${err.message || err}` }], isError: true });
+      return sendResult(id, { content: [{ type: "text", text: JSON.stringify(toolErrorPayload(err), null, 2) }], isError: true });
     }
   }
 
