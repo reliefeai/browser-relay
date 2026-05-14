@@ -64,6 +64,10 @@ browser-relay eval 'document.title' --tab <tabId>
 browser-relay cdp Runtime.evaluate --params '{"expression":"document.title","returnByValue":true}' --tab <tabId>
 ```
 
+`--frame <frameId>` can target same-process iframes and Chrome OOPIF child
+targets. Use `browser-relay frames --json` when you need to inspect raw
+`oopif: true` frame metadata.
+
 For long text or JavaScript, avoid shell escaping with stdin:
 
 ```bash

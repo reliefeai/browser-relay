@@ -132,7 +132,7 @@ Browser Relay is designed to be comfortable for agents, not just low-level autom
 - The HTTP API is simple enough for any custom agent or script.
 - Page snapshots are annotated with links, buttons, inputs, and other interactive elements so agents can plan before acting.
 - Actions target existing attached tabs, keeping the user's browser context visible and predictable.
-- Iframe-aware commands can list frames and target a specific `frameId`.
+- Iframe-aware commands can list frames and target a specific `frameId`, including cross-origin OOPIF frames when Chrome exposes them as child targets.
 - `wait` and controlled raw CDP passthrough cover advanced cases without making Browser Relay a full Playwright replacement.
 
 ## MCP
@@ -180,7 +180,7 @@ printf 'hello\nworld' | browser-relay type --selector textarea --stdin
 browser-relay eval --stdin < script.js
 ```
 
-All browser commands accept `--json` for the raw API response and `--tab <id>` to target a specific tab. `snapshot`, `click`, `type`, `scroll`, `eval`, `wait`, and `download` also accept `--frame <id>` from `browser-relay frames`.
+All browser commands accept `--json` for the raw API response and `--tab <id>` to target a specific tab. `snapshot`, `click`, `type`, `scroll`, `eval`, `wait`, and `download` also accept `--frame <id>` from `browser-relay frames`. Cross-process iframe targets are marked with `oopif: true` in the raw frames response.
 
 Element commands accept CSS selectors and a lightweight locator form. Use `--role`, `--name`, `--locator-text`, and `--exact` when a stable CSS selector is unavailable. This is intentionally a pragmatic approximation of accessible locators, not a full Playwright locator engine.
 

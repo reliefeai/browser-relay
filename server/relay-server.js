@@ -44,7 +44,7 @@ let extensionWs = null;
 let extensionConnectedSince = null;
 let extensionRemoteAddress = null;
 
-const connectedTargets = new Map(); // sessionId -> { tabId, targetId, targetInfo }
+const connectedTargets = new Map(); // sessionId -> { sessionId, targetId, targetInfo, parentSessionId?, rootSessionId?, frameId? }
 let nextExtensionId = 1;
 const pendingCommands = new Map();
 
@@ -106,19 +106,130 @@ function sendToExtension(method, params, sessionId) {
 // ---------------------------------------------------------------------------
 // Resolve target
 // ---------------------------------------------------------------------------
+function targetType(targetInfo = {}) {
+  return targetInfo.type || "page";
+}
+
+function isPageTarget(targetInfo = {}) {
+  return targetType(targetInfo) === "page";
+}
+
+function isIframeTarget(targetInfo = {}) {
+  return targetType(targetInfo) === "iframe";
+}
+
+function frameIdFromTargetInfo(targetInfo = {}) {
+  if (typeof targetInfo.frameId === "string" && targetInfo.frameId) return targetInfo.frameId;
+  if (isIframeTarget(targetInfo) && typeof targetInfo.targetId === "string" && targetInfo.targetId) return targetInfo.targetId;
+  return undefined;
+}
+
+function findTargetByTargetId(targetId) {
+  if (!targetId) return null;
+  for (const target of connectedTargets.values()) {
+    if (target.targetId === targetId) return target;
+  }
+  return null;
+}
+
+function rootSessionForSession(sessionId) {
+  const target = connectedTargets.get(sessionId);
+  if (!target) return sessionId;
+  if (target.rootSessionId) return target.rootSessionId;
+  let current = target;
+  const seen = new Set();
+  while (current?.parentSessionId && !seen.has(current.sessionId)) {
+    seen.add(current.sessionId);
+    current = connectedTargets.get(current.parentSessionId);
+  }
+  return current?.sessionId || sessionId;
+}
+
+function registerAttachedTarget(sessionId, targetInfo = {}, sourceSessionId) {
+  if (!sessionId || !targetInfo?.targetId) return;
+  const type = targetType(targetInfo);
+  if (type !== "page" && type !== "iframe") return;
+
+  const parentSessionId = sourceSessionId && sourceSessionId !== sessionId
+    ? sourceSessionId
+    : undefined;
+  const parentTarget = findTargetByTargetId(targetInfo.parentId);
+  const rootSessionId = isPageTarget(targetInfo)
+    ? sessionId
+    : rootSessionForSession(parentSessionId || parentTarget?.sessionId || sessionId);
+
+  connectedTargets.set(sessionId, {
+    sessionId,
+    targetId: targetInfo.targetId,
+    targetInfo,
+    parentSessionId: parentSessionId || parentTarget?.sessionId,
+    parentTargetId: targetInfo.parentId || parentTarget?.targetId,
+    rootSessionId,
+    frameId: frameIdFromTargetInfo(targetInfo),
+  });
+}
+
+function deleteConnectedTarget(sessionId) {
+  const target = connectedTargets.get(sessionId);
+  const sessionsToDelete = new Set([sessionId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [childSessionId, childTarget] of connectedTargets) {
+      if (sessionsToDelete.has(childSessionId)) continue;
+      if (
+        sessionsToDelete.has(childTarget.parentSessionId) ||
+        (target && isPageTarget(target.targetInfo) && childTarget.rootSessionId === sessionId)
+      ) {
+        sessionsToDelete.add(childSessionId);
+        changed = true;
+      }
+    }
+  }
+  for (const sid of sessionsToDelete) connectedTargets.delete(sid);
+}
+
+function deleteConnectedTargetByTargetId(targetId) {
+  for (const [sessionId, target] of connectedTargets) {
+    if (target.targetId === targetId) deleteConnectedTarget(sessionId);
+  }
+}
+
+function pageTargets() {
+  return Array.from(connectedTargets.values()).filter((target) => isPageTarget(target.targetInfo));
+}
+
 function resolveSession(targetId) {
   if (targetId) {
-    for (const t of connectedTargets.values()) { if (t.targetId === targetId) return t.sessionId; }
+    const target = findTargetByTargetId(targetId);
+    if (target) return target.sessionId;
     throw new Error(`No attached tab with targetId: ${targetId}`);
   }
   let last = null;
-  for (const t of connectedTargets.values()) last = t;
+  for (const target of pageTargets()) last = target;
   if (!last) throw new Error("No attached tabs. Install the Browser Relay extension and open a tab.");
   return last.sessionId;
 }
 
 function resolveTab(tabId) {
   return resolveSession(tabId);
+}
+
+function findFrameTarget(sessionId, frameId) {
+  if (!frameId) return null;
+  const rootSessionId = rootSessionForSession(sessionId);
+  for (const target of connectedTargets.values()) {
+    if (!isIframeTarget(target.targetInfo)) continue;
+    if (target.rootSessionId !== rootSessionId) continue;
+    if (target.frameId === frameId || target.targetId === frameId) return target;
+  }
+  return null;
+}
+
+function resolveFrameCommandSession(sessionId, frameId) {
+  const target = findFrameTarget(sessionId, frameId);
+  if (!target) return { sessionId, frameId, oopif: false };
+  return { sessionId: target.sessionId, frameId: undefined, oopif: true, target };
 }
 
 // ---------------------------------------------------------------------------
@@ -140,24 +251,30 @@ function onExtensionMessage(data) {
   }
 
   if (msg?.method === "forwardCDPEvent") {
+    const sourceSessionId = msg.params?.sessionId;
     const cdpMethod = msg.params?.method;
     const cdpParams = msg.params?.params;
 
     if (cdpMethod === "Target.attachedToTarget") {
       const { sessionId, targetInfo } = cdpParams || {};
-      if (sessionId && targetInfo?.targetId && (targetInfo?.type ?? "page") === "page") {
-        connectedTargets.set(sessionId, { sessionId, targetId: targetInfo.targetId, targetInfo });
-      }
+      registerAttachedTarget(sessionId, targetInfo, sourceSessionId);
     } else if (cdpMethod === "Target.detachedFromTarget") {
       const { sessionId, targetId } = cdpParams || {};
-      if (sessionId) connectedTargets.delete(sessionId);
-      else if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) connectedTargets.delete(sid); } }
+      if (sessionId) deleteConnectedTarget(sessionId);
+      else if (targetId) deleteConnectedTargetByTargetId(targetId);
     } else if (cdpMethod === "Target.targetInfoChanged") {
       const info = cdpParams?.targetInfo;
-      if (info?.targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === info.targetId) { connectedTargets.set(sid, { ...t, targetInfo: { ...t.targetInfo, ...info } }); } } }
+      if (info?.targetId) {
+        for (const [sid, t] of connectedTargets) {
+          if (t.targetId === info.targetId) {
+            const targetInfo = { ...t.targetInfo, ...info };
+            connectedTargets.set(sid, { ...t, targetInfo, frameId: frameIdFromTargetInfo(targetInfo) || t.frameId });
+          }
+        }
+      }
     } else if (cdpMethod === "Target.targetDestroyed" || cdpMethod === "Target.targetCrashed") {
       const targetId = cdpParams?.targetId;
-      if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) connectedTargets.delete(sid); } }
+      if (targetId) deleteConnectedTargetByTargetId(targetId);
     }
   }
 }
@@ -237,14 +354,16 @@ async function getFrameContextId(sessionId, frameId) {
 
 async function evaluateInFrame(sessionId, expression, options = {}) {
   const { frameId, returnByValue = true, awaitPromise = true } = options;
+  const target = resolveFrameCommandSession(sessionId, frameId);
   const params = { expression, returnByValue, awaitPromise };
-  const contextId = await getFrameContextId(sessionId, frameId);
+  const contextId = await getFrameContextId(target.sessionId, target.frameId);
   if (contextId) params.contextId = contextId;
-  return await sendToExtension("Runtime.evaluate", params, sessionId);
+  return await sendToExtension("Runtime.evaluate", params, target.sessionId);
 }
 
 async function frameViewportOffset(sessionId, frameId) {
   if (!frameId) return { x: 0, y: 0 };
+  if (findFrameTarget(sessionId, frameId)) return { x: 0, y: 0 };
   try {
     const owner = await sendToExtension("DOM.getFrameOwner", { frameId }, sessionId);
     const backendNodeId = owner?.backendNodeId;
@@ -442,7 +561,7 @@ async function scrollElementIntoView(sessionId, locator, frameId) {
 
 async function handleTabs(_req, res) {
   const tabs = [];
-  for (const t of connectedTargets.values()) {
+  for (const t of pageTargets()) {
     tabs.push({ id: t.targetId, sessionId: t.sessionId, title: t.targetInfo?.title || "", url: t.targetInfo?.url || "" });
   }
   jsonResponse(res, 200, { ok: true, tabs });
@@ -484,7 +603,30 @@ async function handleFrames(req, res) {
   const sessionId = resolveTab(tabId);
   const frameTree = await getFrameTree(sessionId);
   const frames = flattenFrameTree(frameTree);
-  jsonResponse(res, 200, { ok: true, frameTree, frames });
+  const frameTargets = [];
+  for (const target of connectedTargets.values()) {
+    if (!isIframeTarget(target.targetInfo)) continue;
+    if (target.rootSessionId !== rootSessionForSession(sessionId)) continue;
+    frameTargets.push({
+      frameId: target.frameId || target.targetId,
+      targetId: target.targetId,
+      sessionId: target.sessionId,
+      url: target.targetInfo?.url || "",
+      title: target.targetInfo?.title || "",
+      parentTargetId: target.parentTargetId || "",
+      oopif: true,
+    });
+  }
+  const frameTargetById = new Map(frameTargets.map((target) => [target.frameId, target]));
+  for (const frame of frames) {
+    const target = frameTargetById.get(frame.id);
+    if (target) {
+      frame.oopif = true;
+      frame.targetId = target.targetId;
+      frame.sessionId = target.sessionId;
+    }
+  }
+  jsonResponse(res, 200, { ok: true, frameTree, frames, frameTargets });
 }
 
 async function handleSnapshot(req, res) {
@@ -525,6 +667,7 @@ async function handleClick(req, res) {
   if (!locator) return errorResponse(res, 400, "selector or locator is required");
   const sessionId = resolveTab(body.tabId);
   const frameId = body.frameId;
+  const inputTarget = resolveFrameCommandSession(sessionId, frameId);
 
   const elInfo = await findElement(sessionId, locator, frameId);
   if (!elInfo.found) return jsonResponse(res, 200, elementNotFound(locator, frameId));
@@ -538,11 +681,11 @@ async function handleClick(req, res) {
   const fx = Math.round(elInfo2.found ? elInfo2.x : elInfo.x);
   const fy = Math.round(elInfo2.found ? elInfo2.y : elInfo.y);
 
-  await sendToExtension("Input.dispatchMouseEvent", { type: "mouseMoved", x: fx, y: fy }, sessionId);
-  await sendToExtension("Input.dispatchMouseEvent", { type: "mousePressed", x: fx, y: fy, button, clickCount }, sessionId);
-  await sendToExtension("Input.dispatchMouseEvent", { type: "mouseReleased", x: fx, y: fy, button, clickCount }, sessionId);
+  await sendToExtension("Input.dispatchMouseEvent", { type: "mouseMoved", x: fx, y: fy }, inputTarget.sessionId);
+  await sendToExtension("Input.dispatchMouseEvent", { type: "mousePressed", x: fx, y: fy, button, clickCount }, inputTarget.sessionId);
+  await sendToExtension("Input.dispatchMouseEvent", { type: "mouseReleased", x: fx, y: fy, button, clickCount }, inputTarget.sessionId);
 
-  jsonResponse(res, 200, { ok: true, clicked: true, elementText: elInfo2.text || elInfo.text || "", locator, frameId });
+  jsonResponse(res, 200, { ok: true, clicked: true, elementText: elInfo2.text || elInfo.text || "", locator, frameId, oopif: inputTarget.oopif });
 }
 
 async function handleType(req, res) {
@@ -553,6 +696,7 @@ async function handleType(req, res) {
   const sessionId = resolveTab(body.tabId);
   const locator = locatorFromBody(body);
   const frameId = body.frameId;
+  const inputTarget = resolveFrameCommandSession(sessionId, frameId);
   const submit = body.submit || false;
   const clear = body.clear || false;
 
@@ -587,20 +731,20 @@ async function handleType(req, res) {
   }
 
   if (clear && !locator) {
-    await sendToExtension("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", modifiers: 2 }, sessionId);
-    await sendToExtension("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers: 2 }, sessionId);
-    await sendToExtension("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace" }, sessionId);
-    await sendToExtension("Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace" }, sessionId);
+    await sendToExtension("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", modifiers: 2 }, inputTarget.sessionId);
+    await sendToExtension("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers: 2 }, inputTarget.sessionId);
+    await sendToExtension("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace" }, inputTarget.sessionId);
+    await sendToExtension("Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace" }, inputTarget.sessionId);
   }
 
-  await sendToExtension("Input.insertText", { text }, sessionId);
+  await sendToExtension("Input.insertText", { text }, inputTarget.sessionId);
 
   if (submit) {
-    await sendToExtension("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }, sessionId);
-    await sendToExtension("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }, sessionId);
+    await sendToExtension("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }, inputTarget.sessionId);
+    await sendToExtension("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }, inputTarget.sessionId);
   }
 
-  jsonResponse(res, 200, { ok: true, typed: true, locator, frameId });
+  jsonResponse(res, 200, { ok: true, typed: true, locator, frameId, oopif: inputTarget.oopif });
 }
 
 async function handleScreenshot(req, res) {
@@ -829,7 +973,7 @@ const server = createServer(async (req, res) => {
   }
   if (path === "/json" || path === "/json/" || path === "/json/list" || path === "/json/list/") {
     const list = [];
-    for (const t of connectedTargets.values()) {
+    for (const t of pageTargets()) {
       list.push({ id: t.targetId, type: t.targetInfo?.type || "page", title: t.targetInfo?.title || "", url: t.targetInfo?.url || "" });
     }
     return jsonResponse(res, 200, list);
@@ -838,7 +982,7 @@ const server = createServer(async (req, res) => {
   // All /api/* routes
   if (path.startsWith("/api/")) {
     if (req.method === "GET" && path === "/api/debug") {
-      const tabCount = connectedTargets.size;
+      const tabCount = pageTargets().length;
       const uptimeSeconds = Math.floor((Date.now() - serverStartTime) / 1000);
       return jsonResponse(res, 200, { ok: true, version: RELAY_VERSION, host: RELAY_HOST, port: RELAY_PORT, connected: extensionConnected(), tabCount, uptimeSeconds });
     }
