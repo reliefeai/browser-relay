@@ -189,7 +189,7 @@ Body: {
 }
 ```
 
-Lightweight locators are pragmatic approximations for agent use. Prefer CSS when stable; use `role`, `name`, `text`, and `exact` when the page has no durable selector.
+Lightweight locators are pragmatic approximations for agent use. Prefer CSS when stable; use `role`, `name`, `label`, `placeholder`, `alt`, `title`, `testId`, `text`, and `exact` when the page has no durable selector.
 
 ### 11. browser_cdp
 Advanced local escape hatch for Chrome DevTools Protocol commands.

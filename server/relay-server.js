@@ -399,7 +399,7 @@ function normalizeLocator(input) {
   const raw = typeof input === "string" ? { selector: input } : input;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const locator = {};
-  for (const key of ["selector", "text", "role", "name"]) {
+  for (const key of ["selector", "text", "role", "name", "label", "placeholder", "alt", "title", "testId"]) {
     if (typeof raw[key] === "string" && raw[key].trim()) locator[key] = raw[key].trim();
   }
   if (raw.exact === true) locator.exact = true;
@@ -415,6 +415,11 @@ function locatorFromBody(body, options = {}) {
     text: allowText ? body.text : undefined,
     role: body.role,
     name: body.name,
+    label: body.label,
+    placeholder: body.placeholder,
+    alt: body.alt,
+    title: body.title,
+    testId: body.testId,
     exact: body.exact,
   };
   if (allowLocatorText && typeof body.locatorText === "string") direct.text = body.locatorText;
@@ -424,7 +429,7 @@ function locatorFromBody(body, options = {}) {
 function locatorDescription(locator) {
   if (!locator) return "element";
   const parts = [];
-  for (const key of ["selector", "role", "name", "text"]) {
+  for (const key of ["selector", "role", "name", "text", "label", "placeholder", "alt", "title", "testId"]) {
     if (locator[key]) parts.push(`${key}=${JSON.stringify(locator[key])}`);
   }
   if (locator.exact) parts.push("exact=true");
@@ -473,9 +478,40 @@ function elementResolverExpression(locator, foundExpression) {
     function elementRole(el) {
       return normalize(el.getAttribute('role') || implicitRole(el)).toLowerCase();
     }
+    function textFromIds(ids) {
+      return normalize(String(ids || '').split(/\\s+/).map(function(id) {
+        var node = id && document.getElementById(id);
+        return node ? (node.innerText || node.textContent || '') : '';
+      }).join(' '));
+    }
+    function labelText(label) {
+      if (!label) return '';
+      return normalize(label.innerText || label.textContent || label.getAttribute('aria-label') || label.getAttribute('title'));
+    }
+    function associatedLabelText(el) {
+      var texts = [];
+      var ariaLabelledBy = textFromIds(el.getAttribute('aria-labelledby'));
+      if (ariaLabelledBy) texts.push(ariaLabelledBy);
+      if (el.labels && el.labels.length) {
+        Array.from(el.labels).forEach(function(label) { var text = labelText(label); if (text) texts.push(text); });
+      } else if (el.id) {
+        try {
+          Array.from(document.querySelectorAll('label[for="' + CSS.escape(el.id) + '"]')).forEach(function(label) {
+            var text = labelText(label);
+            if (text) texts.push(text);
+          });
+        } catch {}
+      }
+      var parentLabel = el.closest ? el.closest('label') : null;
+      var parentText = labelText(parentLabel);
+      if (parentText) texts.push(parentText);
+      return normalize(texts.join(' '));
+    }
     function elementName(el) {
       return normalize(
+        textFromIds(el.getAttribute('aria-labelledby')) ||
         el.getAttribute('aria-label') ||
+        associatedLabelText(el) ||
         el.getAttribute('title') ||
         el.getAttribute('alt') ||
         el.getAttribute('placeholder') ||
@@ -487,11 +523,25 @@ function elementResolverExpression(locator, foundExpression) {
     function elementText(el) {
       return normalize(el.innerText || el.textContent || el.value || el.getAttribute('aria-label'));
     }
+    function elementTestId(el) {
+      return normalize(
+        el.getAttribute('data-testid') ||
+        el.getAttribute('data-test-id') ||
+        el.getAttribute('data-test') ||
+        el.getAttribute('data-cy') ||
+        el.getAttribute('data-qa')
+      );
+    }
     function matches(el) {
       if (!el) return false;
       if (locator.role && elementRole(el) !== normalize(locator.role).toLowerCase()) return false;
       if (locator.name && !includesOrEquals(elementName(el), locator.name, locator.exact)) return false;
       if (locator.text && !includesOrEquals(elementText(el), locator.text, locator.exact)) return false;
+      if (locator.label && !includesOrEquals(associatedLabelText(el), locator.label, locator.exact)) return false;
+      if (locator.placeholder && !includesOrEquals(el.getAttribute('placeholder'), locator.placeholder, locator.exact)) return false;
+      if (locator.alt && !includesOrEquals(el.getAttribute('alt'), locator.alt, locator.exact)) return false;
+      if (locator.title && !includesOrEquals(el.getAttribute('title'), locator.title, locator.exact)) return false;
+      if (locator.testId && !includesOrEquals(elementTestId(el), locator.testId, locator.exact)) return false;
       return true;
     }
     var candidates = [];
@@ -499,7 +549,7 @@ function elementResolverExpression(locator, foundExpression) {
       try { candidates = Array.from(document.querySelectorAll(locator.selector)); }
       catch (err) { return JSON.stringify({ found: false, selectorError: err.message || String(err), locator: locator }); }
     } else {
-      candidates = Array.from(document.querySelectorAll('a,button,input,textarea,select,option,[role],[aria-label],[contenteditable],label,h1,h2,h3,h4,h5,h6'));
+      candidates = Array.from(document.querySelectorAll('a,button,input,textarea,select,option,[role],[aria-label],[aria-labelledby],[contenteditable],label,h1,h2,h3,h4,h5,h6,[placeholder],[title],[alt],[data-testid],[data-test-id],[data-test],[data-cy],[data-qa]'));
     }
     var el = candidates.find(matches) || null;
     ${foundExpression}
@@ -799,7 +849,7 @@ async function checkWaitCondition(sessionId, body) {
 
   if (locator) {
     const visible = body.visible === true;
-    const kind = locator.selector && !locator.text && !locator.role && !locator.name ? "selector" : "locator";
+    const kind = locator.selector && !locator.text && !locator.role && !locator.name && !locator.label && !locator.placeholder && !locator.alt && !locator.title && !locator.testId ? "selector" : "locator";
     checks.push({
       kind,
       run: async () => {

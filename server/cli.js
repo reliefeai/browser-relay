@@ -325,10 +325,20 @@ function locatorFromFlags(flags, fallbackSelector, options = {}) {
   const text = flagValue(flags, "locator-text", "locatorText") || (allowTextFlag ? flagValue(flags, "text") : undefined);
   const role = flagValue(flags, "role");
   const name = flagValue(flags, "name");
+  const label = flagValue(flags, "label");
+  const placeholder = flagValue(flags, "placeholder");
+  const alt = flagValue(flags, "alt");
+  const title = flagValue(flags, "title");
+  const testId = flagValue(flags, "test-id", "testId");
   if (selector) locator.selector = String(selector);
   if (text) locator.text = String(text);
   if (role) locator.role = String(role);
   if (name) locator.name = String(name);
+  if (label) locator.label = String(label);
+  if (placeholder) locator.placeholder = String(placeholder);
+  if (alt) locator.alt = String(alt);
+  if (title) locator.title = String(title);
+  if (testId) locator.testId = String(testId);
   if (flagBool(flags, "exact")) locator.exact = true;
   return Object.keys(locator).length ? locator : undefined;
 }
@@ -600,8 +610,13 @@ Common flags:
   --selector, -s <css>         Selector for click/type/download
   --role <role>                Lightweight locator role (button/link/textbox)
   --name <name>                Lightweight locator accessible name
+  --label <text>               Match associated label text
+  --placeholder <text>         Match placeholder text
+  --alt <text>                 Match alt text
+  --title <text>               Match title text
+  --test-id <text>             Match data-testid/data-test-id/data-test/data-cy/data-qa
   --locator-text <text>        Lightweight locator visible text
-  --exact                      Require exact name/text locator match
+  --exact                      Require exact locator match
   --stdin                      Read text/expression from stdin
 
 Examples:

@@ -43,7 +43,12 @@ const LOCATOR_SCHEMA = {
     text: { type: "string", description: "Visible text to match" },
     role: { type: "string", description: "Approximate ARIA or implicit role, e.g. button, link, textbox" },
     name: { type: "string", description: "Approximate accessible name, aria-label, placeholder, title, value, or text" },
-    exact: { type: "boolean", description: "Require exact text/name match instead of substring match" },
+    label: { type: "string", description: "Associated label text" },
+    placeholder: { type: "string", description: "Placeholder text" },
+    alt: { type: "string", description: "Alt text" },
+    title: { type: "string", description: "Title text" },
+    testId: { type: "string", description: "Test id from data-testid, data-test-id, data-test, data-cy, or data-qa" },
+    exact: { type: "boolean", description: "Require exact string match instead of substring match" },
   },
 };
 

@@ -182,7 +182,7 @@ browser-relay eval --stdin < script.js
 
 All browser commands accept `--json` for the raw API response and `--tab <id>` to target a specific tab. `snapshot`, `click`, `type`, `scroll`, `eval`, `wait`, and `download` also accept `--frame <id>` from `browser-relay frames`. Cross-process iframe targets are marked with `oopif: true` in the raw frames response.
 
-Element commands accept CSS selectors and a lightweight locator form. Use `--role`, `--name`, `--locator-text`, and `--exact` when a stable CSS selector is unavailable. This is intentionally a pragmatic approximation of accessible locators, not a full Playwright locator engine.
+Element commands accept CSS selectors and a lightweight locator form. Use `--role`, `--name`, `--label`, `--placeholder`, `--alt`, `--title`, `--test-id`, `--locator-text`, and `--exact` when a stable CSS selector is unavailable. This is intentionally a pragmatic approximation of accessible locators, not a full Playwright locator engine.
 
 Agent guidance: prefer the CLI for browser interaction. Use the HTTP API when
 you are writing code, tests, or an integration against Browser Relay, or when a

@@ -166,7 +166,7 @@ browser-relay eval --stdin < script.js
 
 所有浏览器操作命令都支持 `--json` 输出原始 API 响应，也支持 `--tab <id>` 指定标签页。
 
-元素命令支持 CSS selector，也支持轻量 locator：`--role`、`--name`、`--locator-text`、`--exact`。这只是面向 Agent 的实用近似，不是完整 Playwright locator 引擎。
+元素命令支持 CSS selector，也支持轻量 locator：`--role`、`--name`、`--label`、`--placeholder`、`--alt`、`--title`、`--test-id`、`--locator-text`、`--exact`。这只是面向 Agent 的实用近似，不是完整 Playwright locator 引擎。
 
 Agent 使用规则：浏览器交互默认使用 CLI。只有在编写代码、测试、集成
 Browser Relay，或者当前环境没有 CLI 时，才直接使用 HTTP API。
