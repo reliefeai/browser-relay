@@ -120,6 +120,7 @@ Browser Relay 不是只给底层自动化脚本使用的，它也专门面向 Ag
 - HTTP API 足够简单，自定义 Agent 或脚本也可以直接调用。
 - 页面快照会标注链接、按钮、输入框等交互元素，方便 Agent 先理解页面再行动。
 - 操作会落在已附加的真实标签页上，让用户的浏览器上下文保持可见、可预期。
+- 全页截图会使用页面布局尺寸并带回退路径，返回截图策略和尺寸元数据，避免静默失败。
 
 ## MCP 配置
 
@@ -188,7 +189,7 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/click` | POST | 按 CSS selector 点击元素 |
 | `/api/type` | POST | 输入文本 |
 | `/api/scroll` | POST | 滚动页面 |
-| `/api/screenshot` | GET/POST | 获取 PNG 截图 |
+| `/api/screenshot` | GET/POST | 获取 PNG 截图和策略/尺寸元数据 |
 | `/api/eval` | POST | 执行页面内 JavaScript |
 | `/api/download` | POST | 获取元素 URL |
 

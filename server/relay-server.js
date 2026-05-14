@@ -118,6 +118,12 @@ function resolveTab(tabId) {
   return resolveSession(tabId);
 }
 
+function positiveNumber(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
 // ---------------------------------------------------------------------------
 // Handle extension messages
 // ---------------------------------------------------------------------------
@@ -329,8 +335,37 @@ async function handleScreenshot(req, res) {
   const tabId = body.tabId || url.searchParams.get("tabId") || undefined;
   const fullPage = body.fullPage === true || url.searchParams.get("fullPage") === "true";
   const sessionId = resolveTab(tabId);
-  const result = await sendToExtension("Page.captureScreenshot", { format: "png", captureBeyondViewport: fullPage }, sessionId);
-  jsonResponse(res, 200, { ok: true, data: result?.data || "", format: "png" });
+
+  let strategy = fullPage ? "fullPageClip" : "viewport";
+  let width = null;
+  let height = null;
+  let fallbackError = null;
+  let result = null;
+
+  if (fullPage) {
+    try {
+      const metrics = await sendToExtension("Page.getLayoutMetrics", {}, sessionId);
+      const size = metrics?.cssContentSize || metrics?.contentSize || {};
+      width = Math.ceil(positiveNumber(size.width, 0, 1, Number.MAX_SAFE_INTEGER));
+      height = Math.ceil(positiveNumber(size.height, 0, 1, Number.MAX_SAFE_INTEGER));
+      if (!width || !height) throw new Error("Page.getLayoutMetrics returned no content size");
+      result = await sendToExtension("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: true,
+        fromSurface: true,
+        clip: { x: 0, y: 0, width, height, scale: 1 },
+      }, sessionId);
+    } catch (err) {
+      fallbackError = err instanceof Error ? err.message : String(err);
+      strategy = "captureBeyondViewportFallback";
+      result = await sendToExtension("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, fromSurface: true }, sessionId);
+    }
+  } else {
+    result = await sendToExtension("Page.captureScreenshot", { format: "png", captureBeyondViewport: false, fromSurface: true }, sessionId);
+  }
+
+  const data = result?.data || "";
+  jsonResponse(res, 200, { ok: true, data, format: "png", fullPage, strategy, width, height, bytes: Buffer.byteLength(data, "base64"), fallbackError });
 }
 
 async function handleScroll(req, res) {

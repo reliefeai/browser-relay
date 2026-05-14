@@ -119,11 +119,11 @@ Body: { "direction": "down|up|top|bottom", "amount?": 800, "tabId?": "..." }
 ```
 
 ### 7. browser_screenshot
-Capture a PNG screenshot (base64).
+Capture a PNG screenshot (base64). Full-page capture uses layout metrics and returns strategy/size metadata.
 ```
 POST/GET http://127.0.0.1:18795/api/screenshot?tabId=<id>&fullPage=true
 ```
-Returns: `{ ok: true, data: "base64...", format: "png" }`
+Returns: `{ ok: true, data: "base64...", format: "png", fullPage, strategy, width, height, bytes }`
 
 ### 8. browser_eval
 Evaluate arbitrary JavaScript in the page. The escape hatch.

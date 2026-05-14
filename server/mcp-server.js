@@ -121,7 +121,7 @@ const TOOLS = [
   },
   {
     name: "browser_screenshot",
-    description: "Capture a PNG screenshot of the page. Returns base64-encoded image data. Use to visually inspect the current page state.",
+    description: "Capture a PNG screenshot of the page. Returns base64-encoded image data plus capture strategy and size metadata. Use to visually inspect the current page state.",
     inputSchema: {
       type: "object",
       properties: {

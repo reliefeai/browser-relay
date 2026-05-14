@@ -132,6 +132,7 @@ Browser Relay is designed to be comfortable for agents, not just low-level autom
 - The HTTP API is simple enough for any custom agent or script.
 - Page snapshots are annotated with links, buttons, inputs, and other interactive elements so agents can plan before acting.
 - Actions target existing attached tabs, keeping the user's browser context visible and predictable.
+- Full-page screenshots use layout metrics plus a fallback path so agents get stable capture metadata instead of silent failures.
 
 ## MCP
 
@@ -205,7 +206,7 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/click` | POST | Click an element by CSS selector |
 | `/api/type` | POST | Type into an input |
 | `/api/scroll` | POST | Scroll the page |
-| `/api/screenshot` | GET/POST | Capture a PNG screenshot |
+| `/api/screenshot` | GET/POST | Capture a PNG screenshot with strategy/size metadata |
 | `/api/eval` | POST | Evaluate JavaScript in the page |
 | `/api/download` | POST | Extract an element URL |
 
