@@ -132,6 +132,7 @@ Browser Relay is designed to be comfortable for agents, not just low-level autom
 - The HTTP API is simple enough for any custom agent or script.
 - Page snapshots are annotated with links, buttons, inputs, and other interactive elements so agents can plan before acting.
 - Actions target existing attached tabs, keeping the user's browser context visible and predictable.
+- Console capture records `console.*`, page exceptions, and browser log entries for debugging real-page behavior.
 
 ## MCP
 
@@ -156,6 +157,7 @@ For agents that can run shell commands, the CLI is usually faster and less error
 
 ```bash
 browser-relay tabs
+browser-relay console --tab ABC123 --limit 50
 browser-relay snapshot --tab ABC123 --max-length 20000
 browser-relay click 'button[type=submit]' --tab ABC123
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
@@ -189,6 +191,9 @@ curl http://127.0.0.1:18795/api/tabs
 # Take a text snapshot of a page
 curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123"
 
+# Read captured console/page errors
+curl "http://127.0.0.1:18795/api/console?tabId=ABC123&limit=50"
+
 # Click an element
 curl -X POST http://127.0.0.1:18795/api/click \
   -H "Content-Type: application/json" \
@@ -200,6 +205,8 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/` | GET/HEAD | Health check |
 | `/api/debug` | GET | Server diagnostics |
 | `/api/tabs` | GET | List attached tabs |
+| `/api/console` | GET | Read captured console/page error entries |
+| `/api/console/clear` | POST | Clear captured console entries |
 | `/api/navigate` | POST | Navigate an attached tab |
 | `/api/snapshot` | GET | Get annotated text or raw HTML |
 | `/api/click` | POST | Click an element by CSS selector |
@@ -224,6 +231,7 @@ browser-relay install    # Register the background service
 browser-relay uninstall  # Unregister the background service
 
 browser-relay tabs       # List attached browser tabs
+browser-relay console    # Print captured console/page errors
 browser-relay snapshot   # Print annotated page text
 browser-relay click      # Click an element by CSS selector
 browser-relay type       # Type text into the page
