@@ -53,6 +53,8 @@ browser-relay snapshot --tab <tabId> --max-length 20000
 browser-relay click 'button[type=submit]' --tab <tabId>
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --tab <tabId>
 browser-relay scroll down --amount 1000 --tab <tabId>
+browser-relay download-start https://example.com/file.pdf --filename files/file.pdf
+browser-relay downloads --limit 20
 browser-relay screenshot /tmp/page.png --full-page --tab <tabId>
 browser-relay eval 'document.title' --tab <tabId>
 ```
@@ -139,6 +141,31 @@ POST http://127.0.0.1:18795/api/download
 Body: { "selector": "img.profile-pic", "tabId?": "..." }
 ```
 
+### 10. browser_download_start
+Start a real Chrome download from a URL using the user's browser profile.
+```
+POST http://127.0.0.1:18795/api/download/start
+Body: {
+  "url": "https://example.com/file.pdf",
+  "filename?": "files/file.pdf",
+  "saveAs?": false,
+  "conflictAction?": "uniquify|overwrite|prompt"
+}
+```
+Returns: `{ ok: true, downloadId, id, options }`
+
+### 11. browser_downloads
+List Chrome downloads plus recent Browser Relay download events.
+```
+GET http://127.0.0.1:18795/api/downloads?limit=20&state=complete
+POST http://127.0.0.1:18795/api/downloads/clear
+```
+Use this after `browser_download_start` to verify completion or diagnose interruptions.
+
+Real downloads require the extension's `downloads` permission. If Browser Relay
+was already loaded in Chrome before this capability was installed, reload the
+unpacked extension in `chrome://extensions`.
+
 ## Agent Decision Workflow
 
 When asked to do something with a web page:
@@ -149,7 +176,8 @@ When asked to do something with a web page:
 4. **Plan actions** based on snapshot (click what, type where)
 5. **Execute** (`browser-relay click`, `browser-relay type`, `browser-relay scroll`) one at a time
 6. **Re-snapshot** after each action to verify state
-7. **Screenshot** if visual confirmation is needed
+7. **Use `browser-relay download-start` and `browser-relay downloads`** for real file downloads
+8. **Screenshot** if visual confirmation is needed
 
 ## Example Session
 

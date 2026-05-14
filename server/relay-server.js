@@ -17,6 +17,7 @@ const PING_INTERVAL_MS = 5_000;
 const COMMAND_TIMEOUT_MS = 30_000;
 const EXTENSION_GRACE_MS = 20_000;
 const MAX_BODY_SIZE = 64 * 1024; // 64KB
+const MAX_DOWNLOAD_ENTRIES = 1_000;
 
 const serverStartTime = Date.now();
 
@@ -44,6 +45,8 @@ let extensionRemoteAddress = null;
 const connectedTargets = new Map(); // sessionId -> { tabId, targetId, targetInfo }
 let nextExtensionId = 1;
 const pendingCommands = new Map();
+let nextDownloadEntryId = 1;
+let downloadEntries = [];
 
 let pingTimer = null;
 let graceTimer = null;
@@ -121,6 +124,22 @@ function resolveTab(tabId) {
 // ---------------------------------------------------------------------------
 // Handle extension messages
 // ---------------------------------------------------------------------------
+function appendDownloadEvent(type, params = {}) {
+  const entry = {
+    eventId: nextDownloadEntryId++,
+    receivedAt: new Date().toISOString(),
+    type,
+    ...params,
+  };
+  if (params.id !== undefined && entry.downloadId === undefined) {
+    entry.downloadId = params.id;
+  }
+  downloadEntries.push(entry);
+  if (downloadEntries.length > MAX_DOWNLOAD_ENTRIES) {
+    downloadEntries = downloadEntries.slice(-MAX_DOWNLOAD_ENTRIES);
+  }
+}
+
 function onExtensionMessage(data) {
   let msg;
   try { msg = JSON.parse(typeof data === "string" ? data : data.toString()); } catch { return; }
@@ -139,6 +158,19 @@ function onExtensionMessage(data) {
   if (msg?.method === "forwardCDPEvent") {
     const cdpMethod = msg.params?.method;
     const cdpParams = msg.params?.params;
+
+    if (cdpMethod === "BrowserRelay.downloadCreated") {
+      appendDownloadEvent("created", cdpParams);
+      return;
+    }
+    if (cdpMethod === "BrowserRelay.downloadChanged") {
+      appendDownloadEvent("changed", cdpParams);
+      return;
+    }
+    if (cdpMethod === "BrowserRelay.downloadErased") {
+      appendDownloadEvent("erased", cdpParams);
+      return;
+    }
 
     if (cdpMethod === "Target.attachedToTarget") {
       const { sessionId, targetInfo } = cdpParams || {};
@@ -179,6 +211,12 @@ async function readBody(req) {
   const raw = Buffer.concat(chunks).toString("utf-8");
   if (!raw.trim()) return {};
   try { return JSON.parse(raw); } catch { throw new Error("Invalid JSON in request body"); }
+}
+
+function boundedNumber(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
 }
 
 async function ensureExtension() {
@@ -361,6 +399,51 @@ async function handleDownload(req, res) {
   jsonResponse(res, 200, { ok: true, ...result?.result?.value });
 }
 
+async function handleDownloadStart(req, res) {
+  await ensureExtension();
+  const body = await readBody(req);
+  const url = typeof body.url === "string" ? body.url.trim() : "";
+  if (!url) return errorResponse(res, 400, "url is required");
+
+  const options = { url };
+  if (typeof body.filename === "string" && body.filename.trim()) options.filename = body.filename;
+  if (body.saveAs === true) options.saveAs = true;
+  if (typeof body.conflictAction === "string" && body.conflictAction.trim()) options.conflictAction = body.conflictAction;
+
+  const result = await sendToExtension("BrowserRelay.download", options);
+  jsonResponse(res, 200, { ok: true, downloadId: result?.id, ...result });
+}
+
+function downloadEventId(entry) {
+  return entry.downloadId ?? entry.item?.id ?? entry.delta?.id ?? entry.id;
+}
+
+async function handleDownloads(req, res) {
+  await ensureExtension();
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const limit = boundedNumber(url.searchParams.get("limit"), 100, 1, 1000);
+  const query = { limit };
+  for (const name of ["id", "state", "url", "filename", "query"]) {
+    const value = url.searchParams.get(name);
+    if (value) query[name] = value;
+  }
+
+  const result = await sendToExtension("BrowserRelay.searchDownloads", query);
+  let events = downloadEntries.slice(-limit);
+  if (query.id) {
+    const id = Number(query.id);
+    events = events.filter((entry) => Number(downloadEventId(entry)) === id);
+  }
+
+  jsonResponse(res, 200, { ok: true, downloads: result?.downloads || [], events });
+}
+
+async function handleDownloadsClear(_req, res) {
+  const cleared = downloadEntries.length;
+  downloadEntries = [];
+  jsonResponse(res, 200, { ok: true, cleared });
+}
+
 // ---------------------------------------------------------------------------
 // HTTP Server
 // ---------------------------------------------------------------------------
@@ -426,6 +509,9 @@ const server = createServer(async (req, res) => {
       "POST /api/screenshot": handleScreenshot,
       "POST /api/scroll": handleScroll,
       "POST /api/download": handleDownload,
+      "POST /api/download/start": handleDownloadStart,
+      "GET /api/downloads": handleDownloads,
+      "POST /api/downloads/clear": handleDownloadsClear,
     };
 
     const routeKey = `${req.method} ${path}`;

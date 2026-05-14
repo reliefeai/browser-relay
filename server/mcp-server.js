@@ -32,6 +32,10 @@ async function relayRequest(method, path, body) {
 async function relayGet(path) { return relayRequest("GET", path); }
 async function relayPost(path, body) { return relayRequest("POST", path, body); }
 
+function addQueryParam(params, name, value) {
+  if (value !== undefined && value !== null && value !== "") params.set(name, String(value));
+}
+
 // ---------------------------------------------------------------------------
 // Tool definitions
 // ---------------------------------------------------------------------------
@@ -156,6 +160,49 @@ const TOOLS = [
       required: ["selector"],
     },
     handler: async (args) => relayPost("/api/download", args),
+  },
+  {
+    name: "browser_download_start",
+    description: "Start a real Chrome download from a URL using the browser profile's download manager.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL to download" },
+        filename: { type: "string", description: "Optional relative filename/path suggested to Chrome" },
+        saveAs: { type: "boolean", description: "Ask Chrome to show the save-as dialog" },
+        conflictAction: { type: "string", enum: ["uniquify", "overwrite", "prompt"], description: "How Chrome should handle filename conflicts" },
+      },
+      required: ["url"],
+    },
+    handler: async (args) => relayPost("/api/download/start", args),
+  },
+  {
+    name: "browser_downloads",
+    description: "List Chrome downloads and recent Browser Relay download events. Use clear=true to clear captured relay events.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number", description: "Filter by Chrome download id" },
+        state: { type: "string", enum: ["in_progress", "interrupted", "complete"], description: "Filter by download state" },
+        url: { type: "string", description: "Filter by exact URL" },
+        filename: { type: "string", description: "Filter by exact filename" },
+        query: { type: "string", description: "Search term passed to chrome.downloads.search" },
+        limit: { type: "number", description: "Maximum downloads/events to return" },
+        clear: { type: "boolean", description: "Clear relay-captured download events" },
+      },
+    },
+    handler: async (args) => {
+      if (args.clear) return relayPost("/api/downloads/clear", {});
+      const params = new URLSearchParams();
+      addQueryParam(params, "id", args.id);
+      addQueryParam(params, "state", args.state);
+      addQueryParam(params, "url", args.url);
+      addQueryParam(params, "filename", args.filename);
+      addQueryParam(params, "query", args.query);
+      addQueryParam(params, "limit", args.limit);
+      const qs = params.toString();
+      return relayGet(`/api/downloads${qs ? "?" + qs : ""}`);
+    },
   },
 ];
 
