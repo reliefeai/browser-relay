@@ -2,7 +2,11 @@ document.getElementById('save').addEventListener('click', async () => {
   const port = parseInt(document.getElementById('relayPort').value, 10) || 18795
   const statusEl = document.getElementById('status')
 
-  await chrome.storage.local.set({ relayPort: port })
+  const idleRaw = document.getElementById('idleDetachSeconds').value
+  let idleDetachSeconds = parseInt(idleRaw, 10)
+  if (!Number.isFinite(idleDetachSeconds) || idleDetachSeconds < 0) idleDetachSeconds = 30
+
+  await chrome.storage.local.set({ relayPort: port, idleDetachSeconds })
 
   // Test connection
   const url = `http://127.0.0.1:${port}/`
@@ -22,6 +26,9 @@ document.getElementById('save').addEventListener('click', async () => {
 })
 
 // Load saved settings
-chrome.storage.local.get(['relayPort'], (result) => {
+chrome.storage.local.get(['relayPort', 'idleDetachSeconds'], (result) => {
   if (result.relayPort) document.getElementById('relayPort').value = result.relayPort
+  if (result.idleDetachSeconds !== undefined && result.idleDetachSeconds !== null) {
+    document.getElementById('idleDetachSeconds').value = result.idleDetachSeconds
+  }
 })
