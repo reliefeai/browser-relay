@@ -4,7 +4,7 @@ document.getElementById('save').addEventListener('click', async () => {
 
   const idleRaw = document.getElementById('idleDetachSeconds').value
   let idleDetachSeconds = parseInt(idleRaw, 10)
-  if (!Number.isFinite(idleDetachSeconds) || idleDetachSeconds < 0) idleDetachSeconds = 30
+  if (!Number.isFinite(idleDetachSeconds) || idleDetachSeconds < 0) idleDetachSeconds = 600
 
   await chrome.storage.local.set({ relayPort: port, idleDetachSeconds })
 

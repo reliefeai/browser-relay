@@ -5,7 +5,9 @@ const DEFAULT_PORT = 18795
 // Soft-detach a tab's debugger after this many idle seconds so Chrome's
 // "started debugging this browser" infobar disappears while inactive.
 // 0 disables it (debugger stays attached, infobar always shown).
-const DEFAULT_IDLE_DETACH_SECONDS = 30
+// Default 10 min: short enough to hide the bar when genuinely idle, long
+// enough that it won't recycle a tab an agent is still working with.
+const DEFAULT_IDLE_DETACH_SECONDS = 600
 
 const BADGE = {
   on: { text: 'ON', color: '#22c55e' },
