@@ -337,9 +337,11 @@ async function detachTab(tabId, reason) {
   await persistState()
 }
 
-// Re-attach a tab that was soft-detached for idleness. Reuses the existing
-// sessionId/targetId and does NOT emit Target.attachedToTarget — the upstream
-// relay never saw a detach, so from its side the session was alive all along.
+// Re-attach a tab that was soft-detached for idleness. Reuses the same
+// br-tab sessionId so the upstream agent's session reference stays valid,
+// and re-announces it (like reannounceAttachedTabs) so the relay refreshes
+// its targetId mapping — the page may have navigated to a new target while
+// the debugger was detached.
 async function wakeTab(tabId) {
   const tab = tabs.get(tabId)
   if (!tab || !tab.idle) return
@@ -369,6 +371,9 @@ async function wakeTab(tabId) {
     const info = await chrome.debugger.sendCommand({ tabId }, 'Target.getTargetInfo')
     const tid = String(info?.targetInfo?.targetId || '').trim()
     if (tid) tab.targetId = tid
+    // Refresh the relay's sessionId->targetId map; targetId may have changed
+    // if the page navigated while we were detached.
+    try { sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.attachedToTarget', params: { sessionId: tab.sessionId, targetInfo: { ...info?.targetInfo, attached: true }, waitingForDebugger: false } } }) } catch { /* relay may be down */ }
   } catch { /* keep previous targetId */ }
   tab.idle = false
   tab.lastActivity = Date.now()
@@ -391,6 +396,17 @@ async function softDetachIdleTabs() {
     if (!tab.lastActivity || now - tab.lastActivity < idleMs) continue
     tab.idle = true
     idleDetaching.add(tabId)
+    // chrome.debugger.detach destroys all of Chrome's real flat-mode child
+    // sessions (OOPIFs/related pages). Their sessionIds are now dead, so tell
+    // the relay to drop them and forget the mappings — otherwise a later
+    // command routed to a stale child session fails with CDP -32001
+    // "Session with given id not found". The main br-tab session is kept
+    // (it is addressed by tabId and survives the wake).
+    for (const [childSessionId, parentTabId] of childSessionToTab.entries()) {
+      if (parentTabId !== tabId) continue
+      try { sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.detachedFromTarget', params: { sessionId: childSessionId, reason: 'parent_detached' } } }) } catch { /* relay may be down */ }
+      childSessionToTab.delete(childSessionId)
+    }
     try { await chrome.debugger.detach({ tabId }) } catch { /* may already be detached */ }
     setBadge(tabId, 'idle')
     void chrome.action.setTitle({ tabId, title: 'Browser Relay: idle (re-attaches on next command)' })
