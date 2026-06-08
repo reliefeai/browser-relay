@@ -8,6 +8,7 @@ const DEFAULT_PORT = 18795
 // Default 10 min: short enough to hide the bar when genuinely idle, long
 // enough that it won't recycle a tab an agent is still working with.
 const DEFAULT_IDLE_DETACH_SECONDS = 600
+const IDLE_DETACH_DEFAULT_MIGRATION_KEY = 'idleDetachDefaultMigratedTo600'
 
 const BADGE = {
   on: { text: 'ON', color: '#22c55e' },
@@ -51,11 +52,20 @@ async function getRelayPort() {
 }
 
 async function getIdleDetachMs() {
-  const stored = await chrome.storage.local.get(['idleDetachSeconds'])
+  const stored = await chrome.storage.local.get(['idleDetachSeconds', IDLE_DETACH_DEFAULT_MIGRATION_KEY])
   const raw = stored.idleDetachSeconds
   if (raw === undefined || raw === null || raw === '') return DEFAULT_IDLE_DETACH_SECONDS * 1000
   const n = Number.parseInt(String(raw), 10)
   if (!Number.isFinite(n) || n < 0) return DEFAULT_IDLE_DETACH_SECONDS * 1000
+
+  if (n === 30 && !stored[IDLE_DETACH_DEFAULT_MIGRATION_KEY]) {
+    await chrome.storage.local.set({
+      idleDetachSeconds: DEFAULT_IDLE_DETACH_SECONDS,
+      [IDLE_DETACH_DEFAULT_MIGRATION_KEY]: true,
+    })
+    return DEFAULT_IDLE_DETACH_SECONDS * 1000
+  }
+
   return n * 1000 // 0 => idle-detach disabled
 }
 

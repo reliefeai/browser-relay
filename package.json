@@ -1,6 +1,6 @@
 {
   "name": "@linsoai/browser-relay",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "type": "module",
   "description": "Universal browser relay — control your Chrome from any AI agent via HTTP API or MCP. No auth, no cloud.",
   "repository": {
