@@ -182,10 +182,27 @@ async function ensureRelayConnection() {
     const httpBase = `http://127.0.0.1:${port}`
     const wsUrl = `ws://127.0.0.1:${port}/extension`
 
+    let relayInfo = null
     try {
-      await fetch(`${httpBase}/`, { method: 'HEAD', signal: AbortSignal.timeout(2000) })
+      const res = await fetch(`${httpBase}/api/debug`, { signal: AbortSignal.timeout(2000) })
+      relayInfo = await res.json().catch(() => null)
     } catch (err) {
       throw new Error(`Relay server not reachable at ${httpBase}`)
+    }
+
+    // The npm package ships the relay and this extension together: a version
+    // mismatch means the unpacked extension files on disk were updated by an
+    // npm upgrade while Chrome kept the old code in memory. Reload once per
+    // relay version to pick up the new files — the guard prevents a reload
+    // loop when the extension is loaded from elsewhere (e.g. a dev checkout).
+    const myVersion = chrome.runtime.getManifest().version
+    if (relayInfo?.version && relayInfo.version !== myVersion) {
+      const stored = await chrome.storage.local.get('reloadedForRelayVersion')
+      if (stored.reloadedForRelayVersion !== relayInfo.version) {
+        await chrome.storage.local.set({ reloadedForRelayVersion: relayInfo.version })
+        chrome.runtime.reload()
+        throw new Error('Reloading extension to pick up new version')
+      }
     }
 
     const ws = new WebSocket(wsUrl)
