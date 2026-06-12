@@ -117,7 +117,7 @@ async function fix() {
   process.exit(1);
 }
 
-function status() {
+async function status() {
   let loaded = false;
   let pid = null;
   if (sys === "darwin") {
@@ -137,13 +137,20 @@ function status() {
   }
 
   let healthy = false;
+  let daemonVersion = null;
   try {
-    execSync(`curl -s --max-time 2 ${HEALTH_URL} > /dev/null`, { stdio: "ignore" });
-    healthy = true;
+    const res = await fetch(`${RELAY_URL}/api/debug`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) {
+      healthy = true;
+      daemonVersion = (await res.json())?.version ?? null;
+    }
   } catch {}
 
+  const cliVersion = JSON.parse(readFileSync(join(PKG_DIR, "package.json"), "utf-8")).version;
+  const outdated = daemonVersion && daemonVersion !== cliVersion;
   console.log(`Service:   ${loaded ? "loaded" : "not loaded"}${pid ? ` (pid ${pid})` : ""}`);
   console.log(`HTTP:      ${healthy ? "responding" : "not responding"} (${HEALTH_URL})`);
+  console.log(`Version:   cli ${cliVersion}, daemon ${daemonVersion ?? "unknown"}${outdated ? "  ← outdated, run: browser-relay restart" : ""}`);
   console.log(`Extension: ${EXTENSION_DIR}`);
   console.log(`Logs:      ${LOG_FILE}`);
   process.exit(loaded && healthy ? 0 : 1);
@@ -546,7 +553,7 @@ switch (cmd) {
   case "stop": stop(); break;
   case "restart": restart(); break;
   case "fix": await fix(); break;
-  case "status": status(); break;
+  case "status": await status(); break;
   case "logs": logs(); break;
   case "path": path(); break;
   case "skill": skill(); break;
