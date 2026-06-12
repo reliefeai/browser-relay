@@ -40,6 +40,12 @@ Browser Relay 解决的是这层连接：
 
 当前版本移除了 OpenClaw 专属的网关握手、token 鉴权和平台绑定，整理为通用的本地 Browser Relay。
 
+## OpenClaw 替代方案与真实 Chrome 会话
+
+如果你在找 OpenClaw Browser Relay alternative，Browser Relay 的定位是本地优先的 AI agent browser automation：让 Agent 使用你的真实 Chrome 会话，而不是临时浏览器配置。Agent 可以复用你日常使用的已登录标签页、Cookie、扩展和登录状态，也不要求用户打开远程 Chrome debugging port。
+
+这适合 AI agent real Chrome session 场景：SaaS 后台、管理面板、内网工具、在线文档，以及那些因为没有登录态而让 headless browser 或全新自动化配置失效的页面。
+
 ## 工作方式
 
 ```text
@@ -91,7 +97,7 @@ chrome://extensions
 
 打开右上角开发者模式，点击 `Load unpacked`，选择 `browser-relay path` 输出的 `extension` 目录。
 
-升级 npm 包后，Chrome 不会自动刷新 unpacked extension。执行 `npm install -g @linsoai/browser-relay@latest` 后，需要在 `chrome://extensions` 里点击 Browser Relay 扩展卡片上的刷新按钮。
+升级是全自动的：执行 `npm install -g @linsoai/browser-relay@latest` 后，后台服务自动重启，扩展会在下次重连 relay 时（约 30 秒内）自动重载。可以用 `browser-relay status` 确认，它会同时显示 CLI 和 daemon 的版本。
 
 ### 3. 安装 Agent Skill
 

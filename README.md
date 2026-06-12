@@ -48,6 +48,12 @@ This project is based on source code from [chengyixu/openclaw-browser-relay](htt
 
 This distribution removes OpenClaw-specific gateway handshakes, token authentication, and platform bindings, and repackages the relay as a general-purpose local browser bridge for AI agents.
 
+## OpenClaw Alternative for Real Chrome Sessions
+
+If you are looking for an OpenClaw Browser Relay alternative, Browser Relay focuses on local-first AI agent browser automation with your real Chrome session. It gives agents access to the same authenticated tabs, cookies, extensions, and login state that you use every day without requiring a throwaway browser profile or a remote Chrome debugging port.
+
+This makes it useful for AI agent real Chrome session workflows: SaaS dashboards, admin panels, internal tools, documents, and other pages where headless browsers or fresh automation profiles fail because they are not logged in.
+
 ## Architecture
 
 ```text
@@ -103,7 +109,7 @@ chrome://extensions
 
 Enable **Developer mode**, click **Load unpacked**, and select the `extension` directory printed by `browser-relay path`.
 
-When upgrading the npm package, Chrome will not automatically reload unpacked extensions. After `npm install -g @linsoai/browser-relay@latest`, open `chrome://extensions` and click reload on the Browser Relay extension card.
+Upgrades are hands-free: after `npm install -g @linsoai/browser-relay@latest`, the background service restarts automatically and the extension reloads itself the next time it reconnects to the relay (within ~30 seconds). Check with `browser-relay status`, which shows both the CLI and daemon versions.
 
 ### 3. Install the Agent Skill
 
