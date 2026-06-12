@@ -18,6 +18,60 @@ const BADGE = {
   idle: { text: '·', color: '#6B7280' },
 }
 
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+const TITLE_FRAMES = ['🔵', '⚪']
+
+// Prepend an animated frame to the page title (visible in the tab strip), or
+// strip it when frame is null. Stateless: every call strips any existing frame
+// first, so page-driven title changes are picked up automatically.
+function setTabTitleFrame(tabId, frame) {
+  const expr = `(() => {
+    let t = document.title
+    for (const f of ${JSON.stringify(TITLE_FRAMES)}) {
+      if (t.startsWith(f + ' ')) { t = t.slice(f.length + 1); break }
+    }
+    document.title = ${frame ? `${JSON.stringify(frame + ' ')} + t` : 't'}
+  })()`
+  return chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression: expr, returnByValue: true }).catch(() => {})
+}
+
+/** @type {Map<number, {interval: ReturnType<typeof setInterval>, timeout: ReturnType<typeof setTimeout>}>} */
+const tabActivity = new Map()
+
+function markTabActivity(tabId) {
+  const existing = tabActivity.get(tabId)
+  if (existing) {
+    clearTimeout(existing.timeout)
+    existing.timeout = setTimeout(() => clearTabActivity(tabId), 2000)
+    return
+  }
+  let tick = 0
+  void setTabTitleFrame(tabId, TITLE_FRAMES[0])
+  const interval = setInterval(() => {
+    tick++
+    void chrome.action.setBadgeText({ tabId, text: SPINNER_FRAMES[tick % SPINNER_FRAMES.length] })
+    void chrome.action.setBadgeBackgroundColor({ tabId, color: '#3B82F6' })
+    void chrome.action.setBadgeTextColor({ tabId, color: '#FFFFFF' }).catch(() => {})
+    // Tab-strip blink: flip the title prefix every 500ms
+    if (tick % 5 === 0) void setTabTitleFrame(tabId, TITLE_FRAMES[(tick / 5) % TITLE_FRAMES.length])
+  }, 100)
+  const timeout = setTimeout(() => clearTabActivity(tabId), 2000)
+  tabActivity.set(tabId, { interval, timeout })
+}
+
+function clearTabActivity(tabId) {
+  const anim = tabActivity.get(tabId)
+  if (!anim) return
+  clearInterval(anim.interval)
+  clearTimeout(anim.timeout)
+  tabActivity.delete(tabId)
+  void setTabTitleFrame(tabId, null)
+  const tab = tabs.get(tabId)
+  if (tab?.state === 'connected' && !tab.idle) {
+    setBadge(tabId, relayWs?.readyState === WebSocket.OPEN ? 'on' : 'connecting')
+  }
+}
+
 /** @type {WebSocket|null} */
 let relayWs = null
 /** @type {Promise<void>|null} */
@@ -341,6 +395,7 @@ async function detachTab(tabId, reason) {
   if (tab?.sessionId) tabBySession.delete(tab.sessionId)
   tabs.delete(tabId)
   idleDetaching.delete(tabId)
+  clearTabActivity(tabId)
 
   try { await chrome.debugger.detach({ tabId }) } catch { /* may already be detached */ }
 
@@ -457,6 +512,9 @@ async function connectOrToggle() {
   cancelReconnect()
   try {
     await ensureRelayConnection()
+    // The relay drops all session state when a new extension socket connects —
+    // re-announce existing tabs or they vanish from the relay's tab list.
+    await reannounceAttachedTabs()
     await autoAttachAllTabs()
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -477,7 +535,10 @@ async function handleForwardCdpCommand(msg) {
   if (!tabId) throw new Error(`No attached tab for method ${method}`)
 
   const activeTab = tabs.get(tabId)
-  if (activeTab) activeTab.lastActivity = Date.now()
+  if (activeTab) {
+    activeTab.lastActivity = Date.now()
+    if (activeTab.state === 'connected') markTabActivity(tabId)
+  }
   // createTarget spins up its own fresh tab; closeTarget/activateTarget use the
   // tabs API and need no debugger — everything else must wake an idle tab first.
   const noDebuggerMethods = method === 'Target.createTarget' || method === 'Target.closeTarget' || method === 'Target.activateTarget'
@@ -619,6 +680,7 @@ async function onDebuggerDetach(source, reason) {
 chrome.tabs.onRemoved.addListener((tabId) => void whenReady(() => {
   reattachPending.delete(tabId)
   idleDetaching.delete(tabId)
+  clearTabActivity(tabId)
   if (!tabs.has(tabId)) return
   const tab = tabs.get(tabId)
   if (tab?.sessionId) tabBySession.delete(tab.sessionId)
@@ -633,6 +695,7 @@ chrome.tabs.onRemoved.addListener((tabId) => void whenReady(() => {
 }))
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => void whenReady(() => {
+  clearTabActivity(removedTabId)
   const tab = tabs.get(removedTabId)
   if (!tab) return
   tabs.delete(removedTabId)
