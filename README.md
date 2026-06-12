@@ -216,6 +216,7 @@ browser-relay            # Run the relay server in the foreground
 browser-relay start      # Start the background service
 browser-relay stop       # Stop the background service
 browser-relay restart    # Restart the background service
+browser-relay fix        # Restart and clear stale session state (when tabs won't connect)
 browser-relay status     # Show service state and HTTP health
 browser-relay logs       # Tail /tmp/browser-relay.log
 browser-relay path       # Print the Chrome extension directory

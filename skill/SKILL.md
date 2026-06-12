@@ -197,6 +197,7 @@ Add to your MCP config (`~/.claude/mcp.json` or equivalent):
 | Extension not connected | Relay server is running but no browser extension connected | Check that Chrome is running with the Browser Relay extension installed |
 | No attached tabs | Extension connected but no tab is attached | The extension auto-attaches all regular tabs. Make sure at least one non-chrome:// tab is open |
 | Element not found: selector | The CSS selector did not match anything on the page | Try a different selector, or take a snapshot first to inspect the DOM |
+| Session with given id not found (-32001) | The relay holds stale session state (e.g. after an extension reload) | Run `browser-relay fix` — restarts the relay and clears stale sessions; the extension reconnects automatically |
 
 ## Health Check
 

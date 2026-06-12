@@ -86,6 +86,37 @@ function restart() {
   start();
 }
 
+async function fix() {
+  // Diagnose current state
+  try {
+    const res = await fetch(`${RELAY_URL}/api/debug`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) {
+      const data = await res.json();
+      console.log(`relay: running  extension: ${data.connected ? "connected" : "not connected"}  tabs: ${data.tabCount ?? 0}`);
+    }
+  } catch {
+    console.log("relay: not responding");
+  }
+
+  // Restart clears all stale session state
+  console.log("Restarting relay server...");
+  restart();
+
+  // Poll until healthy
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const res = await fetch(`${RELAY_URL}/`, { signal: AbortSignal.timeout(1000) });
+      if (res.ok) {
+        console.log("Done. Extension will reconnect automatically within a few seconds.");
+        return;
+      }
+    } catch { /* keep waiting */ }
+  }
+  console.error("Relay server did not come back up. Check logs: browser-relay logs");
+  process.exit(1);
+}
+
 function status() {
   let loaded = false;
   let pid = null;
@@ -161,6 +192,7 @@ Commands:
   start       Start as a background service (launchd/systemd)
   stop        Stop the background service
   restart     Restart the background service
+  fix         Restart and clear stale session state (run when tabs won't connect)
   status      Show service + HTTP health
   logs        Tail the service logs
   path        Print the Chrome extension directory
@@ -513,6 +545,7 @@ switch (cmd) {
   case "start": start(); break;
   case "stop": stop(); break;
   case "restart": restart(); break;
+  case "fix": await fix(); break;
   case "status": status(); break;
   case "logs": logs(); break;
   case "path": path(); break;

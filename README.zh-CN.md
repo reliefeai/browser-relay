@@ -199,6 +199,7 @@ browser-relay            # 前台运行 relay server
 browser-relay start      # 启动后台服务
 browser-relay stop       # 停止后台服务
 browser-relay restart    # 重启后台服务
+browser-relay fix        # 重启并清理失效会话（标签页连不上时用）
 browser-relay status     # 查看服务状态和 HTTP 健康检查
 browser-relay logs       # 查看 /tmp/browser-relay.log
 browser-relay path       # 输出 Chrome 扩展目录
