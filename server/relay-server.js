@@ -484,6 +484,7 @@ wss.on("connection", (ws, req) => {
   extensionConnectedSince = new Date().toISOString();
   LOG.info("extension.connect", { remote, since: extensionConnectedSince });
   extensionWs = ws;
+  connectedTargets.clear();
   clearGraceTimer();
   flushReconnectWaiters(true);
 
