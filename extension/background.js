@@ -328,6 +328,61 @@ function requestFromRelay(command) {
   })
 }
 
+const DOWNLOAD_CONFLICT_ACTIONS = new Set(['uniquify', 'overwrite', 'prompt'])
+
+function downloadOptionsFromParams(params = {}) {
+  const url = typeof params.url === 'string' ? params.url.trim() : ''
+  if (!url) throw new Error('url is required')
+
+  const options = { url }
+  if (typeof params.filename === 'string' && params.filename.trim()) {
+    options.filename = params.filename
+  }
+  if (params.saveAs === true) {
+    options.saveAs = true
+  }
+  if (typeof params.conflictAction === 'string' && params.conflictAction.trim()) {
+    if (!DOWNLOAD_CONFLICT_ACTIONS.has(params.conflictAction)) {
+      throw new Error('conflictAction must be uniquify, overwrite, or prompt')
+    }
+    options.conflictAction = params.conflictAction
+  }
+  return options
+}
+
+async function startBrowserDownload(params = {}) {
+  if (!chrome.downloads?.download) {
+    throw new Error('chrome.downloads API unavailable. Reload the extension after granting downloads permission.')
+  }
+  const options = downloadOptionsFromParams(params)
+  const id = await chrome.downloads.download(options)
+  return { id, options }
+}
+
+async function searchBrowserDownloads(params = {}) {
+  if (!chrome.downloads?.search) {
+    throw new Error('chrome.downloads API unavailable. Reload the extension after granting downloads permission.')
+  }
+
+  const query = {}
+  const id = Number(params.id)
+  if (Number.isInteger(id) && id > 0) query.id = id
+  if (typeof params.state === 'string' && params.state.trim()) query.state = params.state
+  if (typeof params.url === 'string' && params.url.trim()) query.url = params.url
+  if (typeof params.filename === 'string' && params.filename.trim()) query.filename = params.filename
+  if (typeof params.query === 'string' && params.query.trim()) query.query = [params.query]
+
+  const limit = Number(params.limit)
+  if (Number.isInteger(limit) && limit > 0) query.limit = Math.min(limit, 1000)
+
+  const downloads = await chrome.downloads.search(query)
+  return { downloads }
+}
+
+function forwardDownloadEvent(method, params) {
+  try { sendToRelay({ method: 'forwardCDPEvent', params: { method, params } }) } catch { /* Relay may be down */ }
+}
+
 async function onRelayMessage(text) {
   let msg
   try { msg = JSON.parse(text) } catch { return }
@@ -545,6 +600,9 @@ async function handleForwardCdpCommand(msg) {
   const params = msg?.params?.params || undefined
   const sessionId = typeof msg?.params?.sessionId === 'string' ? msg.params.sessionId : undefined
 
+  if (method === 'BrowserRelay.download') return await startBrowserDownload(params)
+  if (method === 'BrowserRelay.searchDownloads') return await searchBrowserDownloads(params)
+
   const bySession = sessionId ? getTabBySessionId(sessionId) : null
   const targetId = typeof params?.targetId === 'string' ? params.targetId : undefined
   const tabId = bySession?.tabId || (targetId ? getTabByTargetId(targetId) : null) || (() => { for (const [id, tab] of tabs.entries()) { if (tab.state === 'connected') return id } return null })()
@@ -741,6 +799,12 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => void whenReady(asy
 
 chrome.debugger.onEvent.addListener((...args) => void whenReady(() => onDebuggerEvent(...args)))
 chrome.debugger.onDetach.addListener((...args) => void whenReady(() => onDebuggerDetach(...args)))
+
+if (chrome.downloads) {
+  chrome.downloads.onCreated.addListener((item) => void whenReady(() => forwardDownloadEvent('BrowserRelay.downloadCreated', { item })))
+  chrome.downloads.onChanged.addListener((delta) => void whenReady(() => forwardDownloadEvent('BrowserRelay.downloadChanged', { delta })))
+  chrome.downloads.onErased.addListener((downloadId) => void whenReady(() => forwardDownloadEvent('BrowserRelay.downloadErased', { id: downloadId })))
+}
 
 chrome.action.onClicked.addListener(() => void whenReady(() => connectOrToggle()))
 

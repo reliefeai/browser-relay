@@ -153,6 +153,8 @@ browser-relay click 'button[type=submit]' --tab ABC123
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
 browser-relay key Control+L
 browser-relay scroll down --amount 1000
+browser-relay download-start https://example.com/file.pdf --filename files/file.pdf
+browser-relay downloads --limit 20
 browser-relay screenshot /tmp/page.png --full-page
 browser-relay eval 'document.title'
 ```
@@ -199,6 +201,12 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/screenshot` | GET/POST | 获取 PNG 截图 |
 | `/api/eval` | POST | 执行页面内 JavaScript |
 | `/api/download` | POST | 获取元素 URL |
+| `/api/download/start` | POST | 从 URL 启动真实 Chrome 下载 |
+| `/api/downloads` | GET | 列出 Chrome 下载和最近下载事件 |
+| `/api/downloads/clear` | POST | 清理已捕获的下载事件 |
+
+真实 Chrome 下载需要扩展的 `downloads` 权限。如果是从旧版本升级，需在
+`chrome://extensions` 里重新加载 unpacked 扩展。
 
 ## CLI
 
@@ -220,8 +228,12 @@ browser-relay snapshot   # 输出页面结构化文本
 browser-relay click      # 按 CSS selector 点击元素
 browser-relay type       # 输入文本
 browser-relay key        # 按键或快捷键
+browser-relay scroll     # 滚动页面
 browser-relay screenshot # 保存 PNG 截图
 browser-relay eval       # 在页面内执行 JavaScript
+browser-relay download   # 输出元素 src/href
+browser-relay download-start # 启动 Chrome 下载
+browser-relay downloads      # 列出 Chrome 下载和事件
 browser-relay api-help   # 查看浏览器操作命令示例
 ```
 

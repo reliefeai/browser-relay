@@ -217,6 +217,8 @@ Browser commands:
   scroll      Scroll the page
   screenshot  Save a PNG screenshot
   eval        Evaluate JavaScript in the page
+  download-start Start a Chrome download from a URL
+  downloads      List Chrome downloads and recent download events
   api-help    Show browser command examples
 
   --help,-h   Show this help
@@ -236,7 +238,7 @@ async function version() {
 
 const BOOLEAN_FLAGS = new Set([
   "base64", "clear", "double", "doubleClick", "fullPage", "json",
-  "raw", "stdin", "submit",
+  "raw", "saveAs", "stdin", "submit",
 ]);
 
 const SHORT_FLAGS = {
@@ -379,6 +381,23 @@ function printTabs(data, json) {
   }
   for (const tab of tabs) {
     console.log(`${tab.id}\t${tab.title || "(untitled)"}\t${tab.url || ""}`);
+  }
+}
+
+function printDownloads(data, json) {
+  if (json) return printData(data, true);
+  const downloads = data?.downloads || [];
+  if (!downloads.length) {
+    console.log("No downloads.");
+  } else {
+    for (const item of downloads) {
+      const size = item.totalBytes ? `${item.bytesReceived || 0}/${item.totalBytes}` : `${item.bytesReceived || 0}`;
+      console.log(`${item.id}\t${item.state || ""}\t${size}\t${item.filename || ""}\t${item.url || ""}`);
+    }
+  }
+  const events = data?.events || [];
+  if (events.length) {
+    console.log(`Recent events: ${events.length}`);
   }
 }
 
@@ -525,6 +544,37 @@ async function browserApiCommand(cmd, args) {
       console.log(data.url || "");
       return;
     }
+    case "download-start": {
+      const url = requireValue(flagValue(flags, "url") || positional[0], "url is required");
+      const data = await relayRequest("POST", "/api/download/start", {
+        url,
+        filename: flagValue(flags, "filename", "output"),
+        saveAs: flagBool(flags, "save-as", "saveAs"),
+        conflictAction: flagValue(flags, "conflict-action", "conflictAction"),
+      });
+      ensureOk(data);
+      if (json) return printData(data, true);
+      console.log(`Started download: ${data.downloadId ?? data.id}`);
+      return;
+    }
+    case "downloads": {
+      if (flagBool(flags, "clear")) {
+        const data = await relayRequest("POST", "/api/downloads/clear", {});
+        ensureOk(data);
+        if (json) return printData(data, true);
+        console.log(`Cleared ${data.cleared || 0} download events.`);
+        return;
+      }
+      const params = new URLSearchParams();
+      addParam(params, "id", flagValue(flags, "id"));
+      addParam(params, "state", flagValue(flags, "state"));
+      addParam(params, "url", flagValue(flags, "url"));
+      addParam(params, "filename", flagValue(flags, "filename"));
+      addParam(params, "query", flagValue(flags, "query"));
+      addParam(params, "limit", flagValue(flags, "limit"));
+      const qs = params.toString();
+      return printDownloads(await relayRequest("GET", `/api/downloads${qs ? `?${qs}` : ""}`), json);
+    }
     default:
       throw new Error(`Unknown command: ${cmd}`);
   }
@@ -543,11 +593,16 @@ function apiHelp() {
   screenshot <file.png>        Save a PNG screenshot
   eval <js>                    Evaluate JavaScript in the page
   download <selector>          Print src/href for an element
+  download-start <url>         Start a Chrome download
+  downloads [--limit n]        List Chrome downloads and recent events
 
 Common flags:
   --tab, -t <id>               Target tab id from 'browser-relay tabs'
   --json, -j                   Print JSON response
   --selector, -s <css>         Selector for click/type/download
+  --filename <path>            Suggested download filename/path
+  --save-as                    Ask Chrome to show the save-as dialog
+  --conflict-action <action>   uniquify, overwrite, or prompt
   --stdin                      Read text/expression from stdin
 
 Examples:
@@ -556,6 +611,8 @@ Examples:
   browser-relay click 'button[type=submit]'
   browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
   browser-relay key Control+L
+  browser-relay download-start https://example.com/file.pdf --filename files/file.pdf
+  browser-relay downloads --limit 20
   browser-relay screenshot /tmp/page.png --full-page
   browser-relay eval --stdin < script.js
 `);
@@ -593,6 +650,8 @@ switch (cmd) {
   case "screenshot":
   case "eval":
   case "download":
+  case "download-start":
+  case "downloads":
     try { await browserApiCommand(cmd, process.argv.slice(3)); }
     catch (err) { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); }
     break;
