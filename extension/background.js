@@ -2,12 +2,74 @@
 // Core logic adapted from openclaw auto-attach fork, stripped of gateway handshake
 
 const DEFAULT_PORT = 18795
+// Soft-detach a tab's debugger after this many idle seconds so Chrome's
+// "started debugging this browser" infobar disappears while inactive.
+// 0 disables it (debugger stays attached, infobar always shown).
+// Default 10 min: short enough to hide the bar when genuinely idle, long
+// enough that it won't recycle a tab an agent is still working with.
+const DEFAULT_IDLE_DETACH_SECONDS = 600
+const IDLE_DETACH_DEFAULT_MIGRATION_KEY = 'idleDetachDefaultMigratedTo600'
 
 const BADGE = {
   on: { text: 'ON', color: '#22c55e' },
   off: { text: '', color: '#000000' },
   connecting: { text: '...', color: '#F59E0B' },
   error: { text: '!', color: '#B91C1C' },
+  idle: { text: '·', color: '#6B7280' },
+}
+
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+const TITLE_FRAMES = ['🔵', '⚪']
+
+// Prepend an animated frame to the page title (visible in the tab strip), or
+// strip it when frame is null. Stateless: every call strips any existing frame
+// first, so page-driven title changes are picked up automatically.
+function setTabTitleFrame(tabId, frame) {
+  const expr = `(() => {
+    let t = document.title
+    for (const f of ${JSON.stringify(TITLE_FRAMES)}) {
+      if (t.startsWith(f + ' ')) { t = t.slice(f.length + 1); break }
+    }
+    document.title = ${frame ? `${JSON.stringify(frame + ' ')} + t` : 't'}
+  })()`
+  return chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression: expr, returnByValue: true }).catch(() => {})
+}
+
+/** @type {Map<number, {interval: ReturnType<typeof setInterval>, timeout: ReturnType<typeof setTimeout>}>} */
+const tabActivity = new Map()
+
+function markTabActivity(tabId) {
+  const existing = tabActivity.get(tabId)
+  if (existing) {
+    clearTimeout(existing.timeout)
+    existing.timeout = setTimeout(() => clearTabActivity(tabId), 2000)
+    return
+  }
+  let tick = 0
+  void setTabTitleFrame(tabId, TITLE_FRAMES[0])
+  const interval = setInterval(() => {
+    tick++
+    void chrome.action.setBadgeText({ tabId, text: SPINNER_FRAMES[tick % SPINNER_FRAMES.length] })
+    void chrome.action.setBadgeBackgroundColor({ tabId, color: '#3B82F6' })
+    void chrome.action.setBadgeTextColor({ tabId, color: '#FFFFFF' }).catch(() => {})
+    // Tab-strip blink: flip the title prefix every 500ms
+    if (tick % 5 === 0) void setTabTitleFrame(tabId, TITLE_FRAMES[(tick / 5) % TITLE_FRAMES.length])
+  }, 100)
+  const timeout = setTimeout(() => clearTabActivity(tabId), 2000)
+  tabActivity.set(tabId, { interval, timeout })
+}
+
+function clearTabActivity(tabId) {
+  const anim = tabActivity.get(tabId)
+  if (!anim) return
+  clearInterval(anim.interval)
+  clearTimeout(anim.timeout)
+  tabActivity.delete(tabId)
+  void setTabTitleFrame(tabId, null)
+  const tab = tabs.get(tabId)
+  if (tab?.state === 'connected' && !tab.idle) {
+    setBadge(tabId, relayWs?.readyState === WebSocket.OPEN ? 'on' : 'connecting')
+  }
 }
 
 /** @type {WebSocket|null} */
@@ -16,7 +78,7 @@ let relayWs = null
 let relayConnectPromise = null
 let nextSession = 1
 
-/** @type {Map<number, {state:'connecting'|'connected', sessionId?:string, targetId?:string, attachOrder?:number}>} */
+/** @type {Map<number, {state:'connecting'|'connected', sessionId?:string, targetId?:string, attachOrder?:number, idle?:boolean, lastActivity?:number}>} */
 const tabs = new Map()
 /** @type {Map<string, number>} */
 const tabBySession = new Map()
@@ -28,6 +90,9 @@ const pending = new Map()
 
 const tabOperationLocks = new Set()
 const reattachPending = new Set()
+// Tabs we are deliberately detaching for idleness — guards onDebuggerDetach
+// from treating the self-initiated detach as a navigation/teardown event.
+const idleDetaching = new Set()
 
 let reconnectAttempt = 0
 let reconnectTimer = null
@@ -38,6 +103,24 @@ async function getRelayPort() {
   const n = Number.parseInt(String(stored.relayPort || ''), 10)
   if (!Number.isFinite(n) || n <= 0 || n > 65535) return DEFAULT_PORT
   return n
+}
+
+async function getIdleDetachMs() {
+  const stored = await chrome.storage.local.get(['idleDetachSeconds', IDLE_DETACH_DEFAULT_MIGRATION_KEY])
+  const raw = stored.idleDetachSeconds
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_IDLE_DETACH_SECONDS * 1000
+  const n = Number.parseInt(String(raw), 10)
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_IDLE_DETACH_SECONDS * 1000
+
+  if (n === 30 && !stored[IDLE_DETACH_DEFAULT_MIGRATION_KEY]) {
+    await chrome.storage.local.set({
+      idleDetachSeconds: DEFAULT_IDLE_DETACH_SECONDS,
+      [IDLE_DETACH_DEFAULT_MIGRATION_KEY]: true,
+    })
+    return DEFAULT_IDLE_DETACH_SECONDS * 1000
+  }
+
+  return n * 1000 // 0 => idle-detach disabled
 }
 
 function setBadge(tabId, kind) {
@@ -52,7 +135,7 @@ async function persistState() {
     const entries = []
     for (const [tabId, tab] of tabs.entries()) {
       if (tab.state === 'connected' && tab.sessionId && tab.targetId) {
-        entries.push({ tabId, sessionId: tab.sessionId, targetId: tab.targetId, attachOrder: tab.attachOrder })
+        entries.push({ tabId, sessionId: tab.sessionId, targetId: tab.targetId, attachOrder: tab.attachOrder, idle: !!tab.idle })
       }
     }
     await chrome.storage.session.set({ persistedTabs: entries, nextSession })
@@ -67,14 +150,18 @@ async function rehydrateState() {
     if (stored.nextSession) nextSession = Math.max(nextSession, stored.nextSession)
     const entries = stored.persistedTabs || []
     for (const entry of entries) {
-      tabs.set(entry.tabId, { state: 'connected', sessionId: entry.sessionId, targetId: entry.targetId, attachOrder: entry.attachOrder })
+      tabs.set(entry.tabId, { state: 'connected', sessionId: entry.sessionId, targetId: entry.targetId, attachOrder: entry.attachOrder, idle: !!entry.idle, lastActivity: Date.now() })
       tabBySession.set(entry.sessionId, entry.tabId)
-      setBadge(entry.tabId, 'on')
+      setBadge(entry.tabId, entry.idle ? 'idle' : 'on')
     }
     for (const entry of entries) {
       try {
         await chrome.tabs.get(entry.tabId)
-        await chrome.debugger.sendCommand({ tabId: entry.tabId }, 'Runtime.evaluate', { expression: '1', returnByValue: true })
+        // Idle tabs are intentionally detached — don't probe (it would fail
+        // and wrongly evict them); they re-attach on the next command.
+        if (!entry.idle) {
+          await chrome.debugger.sendCommand({ tabId: entry.tabId }, 'Runtime.evaluate', { expression: '1', returnByValue: true })
+        }
       } catch {
         tabs.delete(entry.tabId)
         tabBySession.delete(entry.sessionId)
@@ -95,10 +182,27 @@ async function ensureRelayConnection() {
     const httpBase = `http://127.0.0.1:${port}`
     const wsUrl = `ws://127.0.0.1:${port}/extension`
 
+    let relayInfo = null
     try {
-      await fetch(`${httpBase}/`, { method: 'HEAD', signal: AbortSignal.timeout(2000) })
+      const res = await fetch(`${httpBase}/api/debug`, { signal: AbortSignal.timeout(2000) })
+      relayInfo = await res.json().catch(() => null)
     } catch (err) {
       throw new Error(`Relay server not reachable at ${httpBase}`)
+    }
+
+    // The npm package ships the relay and this extension together: a version
+    // mismatch means the unpacked extension files on disk were updated by an
+    // npm upgrade while Chrome kept the old code in memory. Reload once per
+    // relay version to pick up the new files — the guard prevents a reload
+    // loop when the extension is loaded from elsewhere (e.g. a dev checkout).
+    const myVersion = chrome.runtime.getManifest().version
+    if (relayInfo?.version && relayInfo.version !== myVersion) {
+      const stored = await chrome.storage.local.get('reloadedForRelayVersion')
+      if (stored.reloadedForRelayVersion !== relayInfo.version) {
+        await chrome.storage.local.set({ reloadedForRelayVersion: relayInfo.version })
+        chrome.runtime.reload()
+        throw new Error('Reloading extension to pick up new version')
+      }
     }
 
     const ws = new WebSocket(wsUrl)
@@ -142,7 +246,7 @@ function onRelayClosed(reason) {
   reattachPending.clear()
 
   for (const [tabId, tab] of tabs.entries()) {
-    if (tab.state === 'connected') {
+    if (tab.state === 'connected' && !tab.idle) {
       setBadge(tabId, 'connecting')
       void chrome.action.setTitle({ tabId, title: 'Browser Relay: reconnecting...' })
     }
@@ -181,6 +285,11 @@ function cancelReconnect() {
 async function reannounceAttachedTabs() {
   for (const [tabId, tab] of tabs.entries()) {
     if (tab.state !== 'connected' || !tab.sessionId || !tab.targetId) continue
+    if (tab.idle) {
+      // Wake briefly so the upstream relay learns this session still exists;
+      // the next idle sweep will soft-detach it again.
+      try { await wakeTab(tabId) } catch { /* fall through to probe/evict */ }
+    }
     try {
       await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression: '1', returnByValue: true })
     } catch {
@@ -217,6 +326,61 @@ function requestFromRelay(command) {
     try { sendToRelay(command) }
     catch (err) { clearTimeout(timer); pending.delete(id); reject(err instanceof Error ? err : new Error(String(err))) }
   })
+}
+
+const DOWNLOAD_CONFLICT_ACTIONS = new Set(['uniquify', 'overwrite', 'prompt'])
+
+function downloadOptionsFromParams(params = {}) {
+  const url = typeof params.url === 'string' ? params.url.trim() : ''
+  if (!url) throw new Error('url is required')
+
+  const options = { url }
+  if (typeof params.filename === 'string' && params.filename.trim()) {
+    options.filename = params.filename
+  }
+  if (params.saveAs === true) {
+    options.saveAs = true
+  }
+  if (typeof params.conflictAction === 'string' && params.conflictAction.trim()) {
+    if (!DOWNLOAD_CONFLICT_ACTIONS.has(params.conflictAction)) {
+      throw new Error('conflictAction must be uniquify, overwrite, or prompt')
+    }
+    options.conflictAction = params.conflictAction
+  }
+  return options
+}
+
+async function startBrowserDownload(params = {}) {
+  if (!chrome.downloads?.download) {
+    throw new Error('chrome.downloads API unavailable. Reload the extension after granting downloads permission.')
+  }
+  const options = downloadOptionsFromParams(params)
+  const id = await chrome.downloads.download(options)
+  return { id, options }
+}
+
+async function searchBrowserDownloads(params = {}) {
+  if (!chrome.downloads?.search) {
+    throw new Error('chrome.downloads API unavailable. Reload the extension after granting downloads permission.')
+  }
+
+  const query = {}
+  const id = Number(params.id)
+  if (Number.isInteger(id) && id > 0) query.id = id
+  if (typeof params.state === 'string' && params.state.trim()) query.state = params.state
+  if (typeof params.url === 'string' && params.url.trim()) query.url = params.url
+  if (typeof params.filename === 'string' && params.filename.trim()) query.filename = params.filename
+  if (typeof params.query === 'string' && params.query.trim()) query.query = [params.query]
+
+  const limit = Number(params.limit)
+  if (Number.isInteger(limit) && limit > 0) query.limit = Math.min(limit, 1000)
+
+  const downloads = await chrome.downloads.search(query)
+  return { downloads }
+}
+
+function forwardDownloadEvent(method, params) {
+  try { sendToRelay({ method: 'forwardCDPEvent', params: { method, params } }) } catch { /* Relay may be down */ }
 }
 
 async function onRelayMessage(text) {
@@ -273,7 +437,7 @@ async function attachTab(tabId, opts = {}) {
   const sid = nextSession++
   const sessionId = `br-tab-${sid}`
 
-  tabs.set(tabId, { state: 'connected', sessionId, targetId, attachOrder: sid })
+  tabs.set(tabId, { state: 'connected', sessionId, targetId, attachOrder: sid, idle: false, lastActivity: Date.now() })
   tabBySession.set(sessionId, tabId)
   void chrome.action.setTitle({ tabId, title: 'Browser Relay: attached (click to detach)' })
 
@@ -302,12 +466,92 @@ async function detachTab(tabId, reason) {
 
   if (tab?.sessionId) tabBySession.delete(tab.sessionId)
   tabs.delete(tabId)
+  idleDetaching.delete(tabId)
+  clearTabActivity(tabId)
 
   try { await chrome.debugger.detach({ tabId }) } catch { /* may already be detached */ }
 
   setBadge(tabId, 'off')
   void chrome.action.setTitle({ tabId, title: 'Browser Relay (click to connect)' })
   await persistState()
+}
+
+// Re-attach a tab that was soft-detached for idleness. Reuses the same
+// br-tab sessionId so the upstream agent's session reference stays valid,
+// and re-announces it (like reannounceAttachedTabs) so the relay refreshes
+// its targetId mapping — the page may have navigated to a new target while
+// the debugger was detached.
+async function wakeTab(tabId) {
+  const tab = tabs.get(tabId)
+  if (!tab || !tab.idle) return
+  idleDetaching.delete(tabId)
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3')
+  } catch (err) {
+    // attach() throws the same "Another debugger is already attached" message
+    // whether DevTools/another extension owns the tab or a stale session of
+    // ours survived — the text can't tell them apart. Probe instead: only
+    // treat the tab as awake if a command actually works. Otherwise stay
+    // idle (don't flip to connected) so the next command retries wakeTab
+    // once the blocking debugger goes away.
+    let alive = false
+    try {
+      await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression: '1', returnByValue: true })
+      alive = true
+    } catch { /* no usable debug session */ }
+    if (!alive) {
+      setBadge(tabId, 'error')
+      void chrome.action.setTitle({ tabId, title: 'Browser Relay: tab busy — close DevTools/other debugger' })
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+  }
+  await chrome.debugger.sendCommand({ tabId }, 'Page.enable').catch(() => {})
+  try {
+    const info = await chrome.debugger.sendCommand({ tabId }, 'Target.getTargetInfo')
+    const tid = String(info?.targetInfo?.targetId || '').trim()
+    if (tid) tab.targetId = tid
+    // Refresh the relay's sessionId->targetId map; targetId may have changed
+    // if the page navigated while we were detached.
+    try { sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.attachedToTarget', params: { sessionId: tab.sessionId, targetInfo: { ...info?.targetInfo, attached: true }, waitingForDebugger: false } } }) } catch { /* relay may be down */ }
+  } catch { /* keep previous targetId */ }
+  tab.idle = false
+  tab.lastActivity = Date.now()
+  setBadge(tabId, relayWs && relayWs.readyState === WebSocket.OPEN ? 'on' : 'connecting')
+  void chrome.action.setTitle({ tabId, title: 'Browser Relay: attached (click to detach)' })
+  await persistState()
+}
+
+// Detach the debugger from tabs idle longer than the configured timeout.
+// This only drops the Chrome-level debugger (hiding the infobar); the logical
+// relay session is kept so the next command transparently re-attaches.
+async function softDetachIdleTabs() {
+  const idleMs = await getIdleDetachMs()
+  if (idleMs <= 0) return
+  const now = Date.now()
+  let changed = false
+  for (const [tabId, tab] of tabs.entries()) {
+    if (tab.state !== 'connected' || tab.idle) continue
+    if (tabOperationLocks.has(tabId) || reattachPending.has(tabId)) continue
+    if (!tab.lastActivity || now - tab.lastActivity < idleMs) continue
+    tab.idle = true
+    idleDetaching.add(tabId)
+    // chrome.debugger.detach destroys all of Chrome's real flat-mode child
+    // sessions (OOPIFs/related pages). Their sessionIds are now dead, so tell
+    // the relay to drop them and forget the mappings — otherwise a later
+    // command routed to a stale child session fails with CDP -32001
+    // "Session with given id not found". The main br-tab session is kept
+    // (it is addressed by tabId and survives the wake).
+    for (const [childSessionId, parentTabId] of childSessionToTab.entries()) {
+      if (parentTabId !== tabId) continue
+      try { sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.detachedFromTarget', params: { sessionId: childSessionId, reason: 'parent_detached' } } }) } catch { /* relay may be down */ }
+      childSessionToTab.delete(childSessionId)
+    }
+    try { await chrome.debugger.detach({ tabId }) } catch { /* may already be detached */ }
+    setBadge(tabId, 'idle')
+    void chrome.action.setTitle({ tabId, title: 'Browser Relay: idle (re-attaches on next command)' })
+    changed = true
+  }
+  if (changed) await persistState()
 }
 
 function isAttachableUrl(url) {
@@ -340,6 +584,9 @@ async function connectOrToggle() {
   cancelReconnect()
   try {
     await ensureRelayConnection()
+    // The relay drops all session state when a new extension socket connects —
+    // re-announce existing tabs or they vanish from the relay's tab list.
+    await reannounceAttachedTabs()
     await autoAttachAllTabs()
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -353,11 +600,26 @@ async function handleForwardCdpCommand(msg) {
   const params = msg?.params?.params || undefined
   const sessionId = typeof msg?.params?.sessionId === 'string' ? msg.params.sessionId : undefined
 
+  if (method === 'BrowserRelay.download') return await startBrowserDownload(params)
+  if (method === 'BrowserRelay.searchDownloads') return await searchBrowserDownloads(params)
+
   const bySession = sessionId ? getTabBySessionId(sessionId) : null
   const targetId = typeof params?.targetId === 'string' ? params.targetId : undefined
   const tabId = bySession?.tabId || (targetId ? getTabByTargetId(targetId) : null) || (() => { for (const [id, tab] of tabs.entries()) { if (tab.state === 'connected') return id } return null })()
 
   if (!tabId) throw new Error(`No attached tab for method ${method}`)
+
+  const activeTab = tabs.get(tabId)
+  if (activeTab) {
+    activeTab.lastActivity = Date.now()
+    if (activeTab.state === 'connected') markTabActivity(tabId)
+  }
+  // createTarget spins up its own fresh tab; closeTarget/activateTarget use the
+  // tabs API and need no debugger — everything else must wake an idle tab first.
+  const noDebuggerMethods = method === 'Target.createTarget' || method === 'Target.closeTarget' || method === 'Target.activateTarget'
+  if (activeTab?.idle && !noDebuggerMethods) {
+    await wakeTab(tabId)
+  }
 
   const debuggee = { tabId }
 
@@ -422,6 +684,10 @@ async function onDebuggerDetach(source, reason) {
   const tabId = source.tabId
   if (!tabId) return
   if (!tabs.has(tabId)) return
+
+  // We detached this tab ourselves for idleness — keep the logical session
+  // (same sessionId/targetId) so it transparently re-attaches on demand.
+  if (idleDetaching.has(tabId) || tabs.get(tabId)?.idle) return
 
   if (reason === 'canceled_by_user' || reason === 'replaced_with_devtools') {
     void detachTab(tabId, reason)
@@ -488,6 +754,8 @@ async function onDebuggerDetach(source, reason) {
 // Tab lifecycle listeners
 chrome.tabs.onRemoved.addListener((tabId) => void whenReady(() => {
   reattachPending.delete(tabId)
+  idleDetaching.delete(tabId)
+  clearTabActivity(tabId)
   if (!tabs.has(tabId)) return
   const tab = tabs.get(tabId)
   if (tab?.sessionId) tabBySession.delete(tab.sessionId)
@@ -502,6 +770,7 @@ chrome.tabs.onRemoved.addListener((tabId) => void whenReady(() => {
 }))
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => void whenReady(() => {
+  clearTabActivity(removedTabId)
   const tab = tabs.get(removedTabId)
   if (!tab) return
   tabs.delete(removedTabId)
@@ -531,19 +800,25 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => void whenReady(asy
 chrome.debugger.onEvent.addListener((...args) => void whenReady(() => onDebuggerEvent(...args)))
 chrome.debugger.onDetach.addListener((...args) => void whenReady(() => onDebuggerDetach(...args)))
 
+if (chrome.downloads) {
+  chrome.downloads.onCreated.addListener((item) => void whenReady(() => forwardDownloadEvent('BrowserRelay.downloadCreated', { item })))
+  chrome.downloads.onChanged.addListener((delta) => void whenReady(() => forwardDownloadEvent('BrowserRelay.downloadChanged', { delta })))
+  chrome.downloads.onErased.addListener((downloadId) => void whenReady(() => forwardDownloadEvent('BrowserRelay.downloadErased', { id: downloadId })))
+}
+
 chrome.action.onClicked.addListener(() => void whenReady(() => connectOrToggle()))
 
 chrome.webNavigation.onCompleted.addListener(({ tabId, frameId }) => void whenReady(() => {
   if (frameId !== 0) return
   const tab = tabs.get(tabId)
-  if (tab?.state === 'connected') {
+  if (tab?.state === 'connected' && !tab.idle) {
     setBadge(tabId, relayWs && relayWs.readyState === WebSocket.OPEN ? 'on' : 'connecting')
   }
 }))
 
 chrome.tabs.onActivated.addListener(({ tabId }) => void whenReady(() => {
   const tab = tabs.get(tabId)
-  if (tab?.state === 'connected') {
+  if (tab?.state === 'connected' && !tab.idle) {
     setBadge(tabId, relayWs && relayWs.readyState === WebSocket.OPEN ? 'on' : 'connecting')
   }
 }))
@@ -559,7 +834,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   await initPromise
 
   for (const [tabId, tab] of tabs.entries()) {
-    if (tab.state === 'connected') {
+    if (tab.state === 'connected' && !tab.idle) {
       setBadge(tabId, relayWs && relayWs.readyState === WebSocket.OPEN ? 'on' : 'connecting')
     }
   }
@@ -567,6 +842,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (relayWs && relayWs.readyState === WebSocket.OPEN) {
     await autoAttachAllTabs()
   }
+
+  await softDetachIdleTabs()
 
   if (!relayWs || relayWs.readyState !== WebSocket.OPEN) {
     if (!relayConnectPromise && !reconnectTimer) {

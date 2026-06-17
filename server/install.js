@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, platform } from "node:os";
@@ -116,6 +116,37 @@ function installWin32() {
   log("Windows: Run 'browser-relay' manually. To auto-start, add to startup apps.");
 }
 
+// Agents keep their own copy of the skill (installed via npx skills add).
+// On upgrade, find copies that no longer match the shipped skill and remind
+// the user to re-run the install command — the copies belong to the agent
+// tools, so we never overwrite them ourselves.
+const AGENT_SKILL_ROOTS = [
+  ".claude/skills",
+  ".codex/skills",
+  ".cursor/skills",
+  ".windsurf/skills",
+  ".gemini/skills",
+  ".copilot/skills",
+  ".config/opencode/skills",
+];
+
+function checkInstalledSkills() {
+  let shipped;
+  try { shipped = readFileSync(join(RELAY_DIR, "skill/SKILL.md"), "utf-8"); } catch { return; }
+  const stale = [];
+  for (const root of AGENT_SKILL_ROOTS) {
+    const dir = join(homedir(), root, "browser-relay");
+    try {
+      if (readFileSync(join(dir, "SKILL.md"), "utf-8") !== shipped) stale.push(dir);
+    } catch { /* skill not installed for this agent */ }
+  }
+  if (!stale.length) return;
+  log("");
+  log("⚠ Installed agent skill is out of date:");
+  for (const dir of stale) log(`   ${dir}`);
+  log(`   Update it with: npx skills add "${join(RELAY_DIR, "skill")}" -g`);
+}
+
 function main() {
   // Only register a background service on global installs. `npm i` (local) is
   // typically a developer adding the package as a dependency — they don't want
@@ -159,10 +190,13 @@ function main() {
     }
   }
 
+  checkInstalledSkills();
+
   log("");
   log("📦 Chrome Extension:");
   log(`   ${EXTENSION_DIR}`);
   log("   Load at: chrome://extensions -> Developer mode -> Load unpacked");
+  log("   Already loaded? It reloads itself on its next relay reconnect (~30s).");
   log("");
   log("📖 Agent Skill:");
   log(`   ${join(RELAY_DIR, "skill/SKILL.md")}`);

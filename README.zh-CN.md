@@ -40,6 +40,12 @@ Browser Relay 解决的是这层连接：
 
 当前版本移除了 OpenClaw 专属的网关握手、token 鉴权和平台绑定，整理为通用的本地 Browser Relay。
 
+## OpenClaw 替代方案与真实 Chrome 会话
+
+如果你在找 OpenClaw Browser Relay alternative，Browser Relay 的定位是本地优先的 AI agent browser automation：让 Agent 使用你的真实 Chrome 会话，而不是临时浏览器配置。Agent 可以复用你日常使用的已登录标签页、Cookie、扩展和登录状态，也不要求用户打开远程 Chrome debugging port。
+
+这适合 AI agent real Chrome session 场景：SaaS 后台、管理面板、内网工具、在线文档，以及那些因为没有登录态而让 headless browser 或全新自动化配置失效的页面。
+
 ## 工作方式
 
 ```text
@@ -91,7 +97,7 @@ chrome://extensions
 
 打开右上角开发者模式，点击 `Load unpacked`，选择 `browser-relay path` 输出的 `extension` 目录。
 
-升级 npm 包后，Chrome 不会自动刷新 unpacked extension。执行 `npm install -g @linsoai/browser-relay@latest` 后，需要在 `chrome://extensions` 里点击 Browser Relay 扩展卡片上的刷新按钮。
+升级是全自动的：执行 `npm install -g @linsoai/browser-relay@latest` 后，后台服务自动重启，扩展会在下次重连 relay 时（约 30 秒内）自动重载。可以用 `browser-relay status` 确认，它会同时显示 CLI 和 daemon 的版本。
 
 ### 3. 安装 Agent Skill
 
@@ -116,7 +122,7 @@ $(browser-relay skill)
 Browser Relay 不是只给底层自动化脚本使用的，它也专门面向 Agent 工作流做了设计：
 
 - 自带 Skill，告诉 Agent 什么时候使用 Browser Relay，以及如何安全交互。
-- MCP server 提供 `browser_tabs`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_screenshot` 等高层工具。
+- MCP server 提供 `browser_tabs`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_key`、`browser_screenshot` 等高层工具。
 - HTTP API 足够简单，自定义 Agent 或脚本也可以直接调用。
 - 页面快照会标注链接、按钮、输入框等交互元素，方便 Agent 先理解页面再行动。
 - 操作会落在已附加的真实标签页上，让用户的浏览器上下文保持可见、可预期。
@@ -147,7 +153,10 @@ browser-relay console --tab ABC123 --limit 50
 browser-relay snapshot --tab ABC123 --max-length 20000
 browser-relay click 'button[type=submit]' --tab ABC123
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+browser-relay key Control+L
 browser-relay scroll down --amount 1000
+browser-relay download-start https://example.com/file.pdf --filename files/file.pdf
+browser-relay downloads --limit 20
 browser-relay screenshot /tmp/page.png --full-page
 browser-relay eval 'document.title'
 ```
@@ -193,10 +202,17 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/snapshot` | GET | 获取页面文本快照或 HTML |
 | `/api/click` | POST | 按 CSS selector 点击元素 |
 | `/api/type` | POST | 输入文本 |
+| `/api/key` | POST | 按键或键盘快捷键 |
 | `/api/scroll` | POST | 滚动页面 |
 | `/api/screenshot` | GET/POST | 获取 PNG 截图 |
 | `/api/eval` | POST | 执行页面内 JavaScript |
 | `/api/download` | POST | 获取元素 URL |
+| `/api/download/start` | POST | 从 URL 启动真实 Chrome 下载 |
+| `/api/downloads` | GET | 列出 Chrome 下载和最近下载事件 |
+| `/api/downloads/clear` | POST | 清理已捕获的下载事件 |
+
+真实 Chrome 下载需要扩展的 `downloads` 权限。如果是从旧版本升级，需在
+`chrome://extensions` 里重新加载 unpacked 扩展。
 
 ## CLI
 
@@ -205,6 +221,7 @@ browser-relay            # 前台运行 relay server
 browser-relay start      # 启动后台服务
 browser-relay stop       # 停止后台服务
 browser-relay restart    # 重启后台服务
+browser-relay fix        # 重启并清理失效会话（标签页连不上时用）
 browser-relay status     # 查看服务状态和 HTTP 健康检查
 browser-relay logs       # 查看 /tmp/browser-relay.log
 browser-relay path       # 输出 Chrome 扩展目录
@@ -217,8 +234,13 @@ browser-relay console    # 输出 console 和页面错误记录
 browser-relay snapshot   # 输出页面结构化文本
 browser-relay click      # 按 CSS selector 点击元素
 browser-relay type       # 输入文本
+browser-relay key        # 按键或快捷键
+browser-relay scroll     # 滚动页面
 browser-relay screenshot # 保存 PNG 截图
 browser-relay eval       # 在页面内执行 JavaScript
+browser-relay download   # 输出元素 src/href
+browser-relay download-start # 启动 Chrome 下载
+browser-relay downloads      # 列出 Chrome 下载和事件
 browser-relay api-help   # 查看浏览器操作命令示例
 ```
 

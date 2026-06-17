@@ -18,6 +18,7 @@ const COMMAND_TIMEOUT_MS = 30_000;
 const EXTENSION_GRACE_MS = 20_000;
 const MAX_BODY_SIZE = 64 * 1024; // 64KB
 const MAX_CONSOLE_ENTRIES = 1_000;
+const MAX_DOWNLOAD_ENTRIES = 1_000;
 
 const serverStartTime = Date.now();
 
@@ -48,6 +49,8 @@ const pendingCommands = new Map();
 let nextConsoleEntryId = 1;
 let consoleEntries = [];
 const consoleEnabledSessions = new Set();
+let nextDownloadEntryId = 1;
+let downloadEntries = [];
 
 let pingTimer = null;
 let graceTimer = null;
@@ -218,6 +221,22 @@ async function enableConsoleCapture(sessionId) {
 // ---------------------------------------------------------------------------
 // Handle extension messages
 // ---------------------------------------------------------------------------
+function appendDownloadEvent(type, params = {}) {
+  const entry = {
+    eventId: nextDownloadEntryId++,
+    receivedAt: new Date().toISOString(),
+    type,
+    ...params,
+  };
+  if (params.id !== undefined && entry.downloadId === undefined) {
+    entry.downloadId = params.id;
+  }
+  downloadEntries.push(entry);
+  if (downloadEntries.length > MAX_DOWNLOAD_ENTRIES) {
+    downloadEntries = downloadEntries.slice(-MAX_DOWNLOAD_ENTRIES);
+  }
+}
+
 function onExtensionMessage(data) {
   let msg;
   try { msg = JSON.parse(typeof data === "string" ? data : data.toString()); } catch { return; }
@@ -244,6 +263,19 @@ function onExtensionMessage(data) {
       cdpMethod === "Log.entryAdded"
     )) {
       appendConsoleEvent(eventSessionId, cdpMethod, cdpParams);
+    }
+
+    if (cdpMethod === "BrowserRelay.downloadCreated") {
+      appendDownloadEvent("created", cdpParams);
+      return;
+    }
+    if (cdpMethod === "BrowserRelay.downloadChanged") {
+      appendDownloadEvent("changed", cdpParams);
+      return;
+    }
+    if (cdpMethod === "BrowserRelay.downloadErased") {
+      appendDownloadEvent("erased", cdpParams);
+      return;
     }
 
     if (cdpMethod === "Target.attachedToTarget") {
@@ -292,6 +324,111 @@ async function ensureExtension() {
   if (extensionConnected()) return;
   const reconnected = await waitForExtension(3_000);
   if (!reconnected || !extensionConnected()) { throw new Error("Extension not connected. Is the browser running with the extension?"); }
+}
+
+const NAMED_KEYS = {
+  enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 },
+  return: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 },
+  escape: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
+  esc: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
+  tab: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
+  backspace: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
+  delete: { key: "Delete", code: "Delete", windowsVirtualKeyCode: 46 },
+  del: { key: "Delete", code: "Delete", windowsVirtualKeyCode: 46 },
+  arrowup: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
+  up: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
+  arrowdown: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
+  down: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
+  arrowleft: { key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 },
+  left: { key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 },
+  arrowright: { key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 },
+  right: { key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 },
+  home: { key: "Home", code: "Home", windowsVirtualKeyCode: 36 },
+  end: { key: "End", code: "End", windowsVirtualKeyCode: 35 },
+  pageup: { key: "PageUp", code: "PageUp", windowsVirtualKeyCode: 33 },
+  pagedown: { key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34 },
+  space: { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " },
+};
+
+function modifierMaskFrom(body, comboParts = []) {
+  let modifiers = Number.isInteger(body.modifiers) ? body.modifiers : 0;
+  const names = new Set(comboParts.map((part) => part.toLowerCase()));
+  if (body.alt === true || names.has("alt") || names.has("option")) modifiers |= 1;
+  if (body.ctrl === true || body.control === true || names.has("ctrl") || names.has("control")) modifiers |= 2;
+  if (body.meta === true || body.cmd === true || body.command === true || names.has("meta") || names.has("cmd") || names.has("command")) modifiers |= 4;
+  if (body.shift === true || names.has("shift")) modifiers |= 8;
+  return modifiers;
+}
+
+function keyDefinition(rawKey, modifiers, explicitText) {
+  const raw = String(rawKey || "").trim();
+  if (!raw) return null;
+  const named = NAMED_KEYS[raw.toLowerCase()];
+  if (named) return { ...named, text: explicitText ?? named.text ?? "" };
+
+  if (raw.length === 1) {
+    const upper = raw.toUpperCase();
+    const hasCommandModifier = (modifiers & 1) || (modifiers & 2) || (modifiers & 4);
+    if (/^[A-Z]$/i.test(raw)) {
+      const key = hasCommandModifier && !(modifiers & 8) ? raw.toLowerCase() : raw;
+      return {
+        key,
+        code: `Key${upper}`,
+        windowsVirtualKeyCode: upper.charCodeAt(0),
+        text: explicitText ?? (hasCommandModifier ? "" : raw),
+      };
+    }
+    if (/^\d$/.test(raw)) {
+      return {
+        key: raw,
+        code: `Digit${raw}`,
+        windowsVirtualKeyCode: raw.charCodeAt(0),
+        text: explicitText ?? (hasCommandModifier ? "" : raw),
+      };
+    }
+    return {
+      key: raw,
+      code: raw === " " ? "Space" : "",
+      windowsVirtualKeyCode: raw.charCodeAt(0),
+      text: explicitText ?? (hasCommandModifier ? "" : raw),
+    };
+  }
+
+  return { key: raw, code: raw, windowsVirtualKeyCode: 0, text: explicitText ?? "" };
+}
+
+function normalizeKeyInput(body) {
+  let rawCombo = "";
+  if (typeof body.combo === "string" && body.combo.trim()) rawCombo = body.combo;
+  else if (typeof body.key === "string" && body.key.trim()) rawCombo = body.key;
+  if (!rawCombo) return null;
+  const parts = rawCombo.split("+").map((part) => part.trim()).filter(Boolean);
+  const keyPart = parts.length ? parts[parts.length - 1] : rawCombo;
+  const modifiers = modifierMaskFrom(body, parts.slice(0, -1));
+  const explicitText = typeof body.text === "string" ? body.text : undefined;
+  const definition = keyDefinition(keyPart, modifiers, explicitText);
+  if (!definition) return null;
+  return {
+    key: definition.key,
+    code: body.code || definition.code || definition.key,
+    windowsVirtualKeyCode: body.windowsVirtualKeyCode || definition.windowsVirtualKeyCode || 0,
+    nativeVirtualKeyCode: body.nativeVirtualKeyCode || body.windowsVirtualKeyCode || definition.windowsVirtualKeyCode || 0,
+    text: definition.text || "",
+    modifiers,
+  };
+}
+
+async function dispatchKeyPress(sessionId, input) {
+  const base = {
+    key: input.key,
+    code: input.code,
+    windowsVirtualKeyCode: input.windowsVirtualKeyCode,
+    nativeVirtualKeyCode: input.nativeVirtualKeyCode,
+    modifiers: input.modifiers,
+  };
+  const down = input.text ? { ...base, text: input.text, unmodifiedText: input.text } : base;
+  await sendToExtension("Input.dispatchKeyEvent", { type: "keyDown", ...down }, sessionId);
+  await sendToExtension("Input.dispatchKeyEvent", { type: "keyUp", ...base }, sessionId);
 }
 
 // ---------------------------------------------------------------------------
@@ -471,6 +608,16 @@ async function handleType(req, res) {
   jsonResponse(res, 200, { ok: true, typed: true });
 }
 
+async function handleKey(req, res) {
+  const body = await readBody(req);
+  const input = normalizeKeyInput(body);
+  if (!input) return errorResponse(res, 400, "key or combo is required");
+  await ensureExtension();
+  const sessionId = resolveTab(body.tabId);
+  await dispatchKeyPress(sessionId, input);
+  jsonResponse(res, 200, { ok: true, pressed: true, ...input });
+}
+
 async function handleScreenshot(req, res) {
   await ensureExtension();
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
@@ -508,6 +655,51 @@ async function handleDownload(req, res) {
     returnByValue: true,
   }, sessionId);
   jsonResponse(res, 200, { ok: true, ...result?.result?.value });
+}
+
+async function handleDownloadStart(req, res) {
+  await ensureExtension();
+  const body = await readBody(req);
+  const url = typeof body.url === "string" ? body.url.trim() : "";
+  if (!url) return errorResponse(res, 400, "url is required");
+
+  const options = { url };
+  if (typeof body.filename === "string" && body.filename.trim()) options.filename = body.filename;
+  if (body.saveAs === true) options.saveAs = true;
+  if (typeof body.conflictAction === "string" && body.conflictAction.trim()) options.conflictAction = body.conflictAction;
+
+  const result = await sendToExtension("BrowserRelay.download", options);
+  jsonResponse(res, 200, { ok: true, downloadId: result?.id, ...result });
+}
+
+function downloadEventId(entry) {
+  return entry.downloadId ?? entry.item?.id ?? entry.delta?.id ?? entry.id;
+}
+
+async function handleDownloads(req, res) {
+  await ensureExtension();
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const limit = boundedNumber(url.searchParams.get("limit"), 100, 1, 1000);
+  const query = { limit };
+  for (const name of ["id", "state", "url", "filename", "query"]) {
+    const value = url.searchParams.get(name);
+    if (value) query[name] = value;
+  }
+
+  const result = await sendToExtension("BrowserRelay.searchDownloads", query);
+  let events = downloadEntries.slice(-limit);
+  if (query.id) {
+    const id = Number(query.id);
+    events = events.filter((entry) => Number(downloadEventId(entry)) === id);
+  }
+
+  jsonResponse(res, 200, { ok: true, downloads: result?.downloads || [], events });
+}
+
+async function handleDownloadsClear(_req, res) {
+  const cleared = downloadEntries.length;
+  downloadEntries = [];
+  jsonResponse(res, 200, { ok: true, cleared });
 }
 
 // ---------------------------------------------------------------------------
@@ -573,10 +765,14 @@ const server = createServer(async (req, res) => {
       "GET /api/snapshot": handleSnapshot,
       "POST /api/click": handleClick,
       "POST /api/type": handleType,
+      "POST /api/key": handleKey,
       "GET /api/screenshot": handleScreenshot,
       "POST /api/screenshot": handleScreenshot,
       "POST /api/scroll": handleScroll,
       "POST /api/download": handleDownload,
+      "POST /api/download/start": handleDownloadStart,
+      "GET /api/downloads": handleDownloads,
+      "POST /api/downloads/clear": handleDownloadsClear,
     };
 
     const routeKey = `${req.method} ${path}`;
@@ -635,6 +831,7 @@ wss.on("connection", (ws, req) => {
   extensionConnectedSince = new Date().toISOString();
   LOG.info("extension.connect", { remote, since: extensionConnectedSince });
   extensionWs = ws;
+  connectedTargets.clear();
   clearGraceTimer();
   flushReconnectWaiters(true);
 

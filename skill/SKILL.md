@@ -53,7 +53,10 @@ browser-relay console --tab <tabId> --limit 50
 browser-relay snapshot --tab <tabId> --max-length 20000
 browser-relay click 'button[type=submit]' --tab <tabId>
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --tab <tabId>
+browser-relay key Control+L --tab <tabId>
 browser-relay scroll down --amount 1000 --tab <tabId>
+browser-relay download-start https://example.com/file.pdf --filename files/file.pdf
+browser-relay downloads --limit 20
 browser-relay screenshot /tmp/page.png --full-page --tab <tabId>
 browser-relay eval 'document.title' --tab <tabId>
 ```
@@ -128,26 +131,61 @@ POST http://127.0.0.1:18795/api/scroll
 Body: { "direction": "down|up|top|bottom", "amount?": 800, "tabId?": "..." }
 ```
 
-### 7. browser_screenshot
+### 7. browser_key
+Press a key or keyboard shortcut using real keyboard events.
+```
+POST http://127.0.0.1:18795/api/key
+Body: { "key?": "Enter", "combo?": "Control+L", "tabId?": "..." }
+```
+
+Use `combo` for shortcuts (`Control+L`, `Meta+K`, `Shift+Tab`) and `key`
+for single keys (`Enter`, `Escape`, `ArrowDown`, `a`).
+
+### 8. browser_screenshot
 Capture a PNG screenshot (base64).
 ```
 POST/GET http://127.0.0.1:18795/api/screenshot?tabId=<id>&fullPage=true
 ```
 Returns: `{ ok: true, data: "base64...", format: "png" }`
 
-### 8. browser_eval
+### 9. browser_eval
 Evaluate arbitrary JavaScript in the page. The escape hatch.
 ```
 POST http://127.0.0.1:18795/api/eval
 Body: { "expression": "document.querySelector('h1').innerText", "tabId?": "..." }
 ```
 
-### 9. browser_download
+### 10. browser_download
 Get the URL of an image/media/link element.
 ```
 POST http://127.0.0.1:18795/api/download
 Body: { "selector": "img.profile-pic", "tabId?": "..." }
 ```
+
+### 10. browser_download_start
+Start a real Chrome download from a URL using the user's browser profile.
+```
+POST http://127.0.0.1:18795/api/download/start
+Body: {
+  "url": "https://example.com/file.pdf",
+  "filename?": "files/file.pdf",
+  "saveAs?": false,
+  "conflictAction?": "uniquify|overwrite|prompt"
+}
+```
+Returns: `{ ok: true, downloadId, id, options }`
+
+### 11. browser_downloads
+List Chrome downloads plus recent Browser Relay download events.
+```
+GET http://127.0.0.1:18795/api/downloads?limit=20&state=complete
+POST http://127.0.0.1:18795/api/downloads/clear
+```
+Use this after `browser_download_start` to verify completion or diagnose interruptions.
+
+Real downloads require the extension's `downloads` permission. If Browser Relay
+was already loaded in Chrome before this capability was installed, reload the
+unpacked extension in `chrome://extensions`.
 
 ## Agent Decision Workflow
 
@@ -157,10 +195,11 @@ When asked to do something with a web page:
 2. **`browser-relay navigate`** if needed — go to the target page
 3. **`browser-relay snapshot`** — understand the page structure
 4. **Plan actions** based on snapshot (click what, type where)
-5. **Execute** (`browser-relay click`, `browser-relay type`, `browser-relay scroll`) one at a time
+5. **Execute** (`browser-relay click`, `browser-relay type`, `browser-relay key`, `browser-relay scroll`) one at a time
 6. **`browser-relay console`** if the page behaves unexpectedly or after risky actions
 7. **Re-snapshot** after each action to verify state
-8. **Screenshot** if visual confirmation is needed
+8. **Use `browser-relay download-start` and `browser-relay downloads`** for real file downloads
+9. **Screenshot** if visual confirmation is needed
 
 ## Example Session
 
@@ -208,6 +247,7 @@ Add to your MCP config (`~/.claude/mcp.json` or equivalent):
 | Extension not connected | Relay server is running but no browser extension connected | Check that Chrome is running with the Browser Relay extension installed |
 | No attached tabs | Extension connected but no tab is attached | The extension auto-attaches all regular tabs. Make sure at least one non-chrome:// tab is open |
 | Element not found: selector | The CSS selector did not match anything on the page | Try a different selector, or take a snapshot first to inspect the DOM |
+| Session with given id not found (-32001) | The relay holds stale session state (e.g. after an extension reload) | Run `browser-relay fix` — restarts the relay and clears stale sessions; the extension reconnects automatically |
 
 ## Health Check
 
