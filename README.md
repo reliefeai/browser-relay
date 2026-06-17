@@ -48,6 +48,12 @@ This project is based on source code from [chengyixu/openclaw-browser-relay](htt
 
 This distribution removes OpenClaw-specific gateway handshakes, token authentication, and platform bindings, and repackages the relay as a general-purpose local browser bridge for AI agents.
 
+## OpenClaw Alternative for Real Chrome Sessions
+
+If you are looking for an OpenClaw Browser Relay alternative, Browser Relay focuses on local-first AI agent browser automation with your real Chrome session. It gives agents access to the same authenticated tabs, cookies, extensions, and login state that you use every day without requiring a throwaway browser profile or a remote Chrome debugging port.
+
+This makes it useful for AI agent real Chrome session workflows: SaaS dashboards, admin panels, internal tools, documents, and other pages where headless browsers or fresh automation profiles fail because they are not logged in.
+
 ## Architecture
 
 ```text
@@ -103,7 +109,7 @@ chrome://extensions
 
 Enable **Developer mode**, click **Load unpacked**, and select the `extension` directory printed by `browser-relay path`.
 
-When upgrading the npm package, Chrome will not automatically reload unpacked extensions. After `npm install -g @linsoai/browser-relay@latest`, open `chrome://extensions` and click reload on the Browser Relay extension card.
+Upgrades are hands-free: after `npm install -g @linsoai/browser-relay@latest`, the background service restarts automatically and the extension reloads itself the next time it reconnects to the relay (within ~30 seconds). Check with `browser-relay status`, which shows both the CLI and daemon versions.
 
 ### 3. Install the Agent Skill
 
@@ -128,7 +134,7 @@ After that, your agent can operate your own browser without opening a separate a
 Browser Relay is designed to be comfortable for agents, not just low-level automation scripts.
 
 - The included Skill tells agents when to use Browser Relay and how to interact safely.
-- The MCP server exposes high-level tools such as `browser_tabs`, `browser_snapshot`, `browser_click`, `browser_type`, and `browser_screenshot`.
+- The MCP server exposes high-level tools such as `browser_tabs`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_key`, and `browser_screenshot`.
 - The HTTP API is simple enough for any custom agent or script.
 - Page snapshots are annotated with links, buttons, inputs, and other interactive elements so agents can plan before acting.
 - Actions target existing attached tabs, keeping the user's browser context visible and predictable.
@@ -159,6 +165,7 @@ browser-relay tabs
 browser-relay snapshot --tab ABC123 --max-length 20000
 browser-relay click 'button[type=submit]' --tab ABC123
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+browser-relay key Control+L
 browser-relay scroll down --amount 1000
 browser-relay download-start https://example.com/file.pdf --filename files/file.pdf
 browser-relay downloads --limit 20
@@ -206,6 +213,7 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/snapshot` | GET | Get annotated text or raw HTML |
 | `/api/click` | POST | Click an element by CSS selector |
 | `/api/type` | POST | Type into an input |
+| `/api/key` | POST | Press a key or keyboard shortcut |
 | `/api/scroll` | POST | Scroll the page |
 | `/api/screenshot` | GET/POST | Capture a PNG screenshot |
 | `/api/eval` | POST | Evaluate JavaScript in the page |
@@ -225,6 +233,7 @@ browser-relay            # Run the relay server in the foreground
 browser-relay start      # Start the background service
 browser-relay stop       # Stop the background service
 browser-relay restart    # Restart the background service
+browser-relay fix        # Restart and clear stale session state (when tabs won't connect)
 browser-relay status     # Show service state and HTTP health
 browser-relay logs       # Tail /tmp/browser-relay.log
 browser-relay path       # Print the Chrome extension directory
@@ -236,6 +245,7 @@ browser-relay tabs       # List attached browser tabs
 browser-relay snapshot   # Print annotated page text
 browser-relay click      # Click an element by CSS selector
 browser-relay type       # Type text into the page
+browser-relay key        # Press a key or shortcut
 browser-relay scroll     # Scroll the page
 browser-relay screenshot # Save a PNG screenshot
 browser-relay eval       # Evaluate JavaScript in the page

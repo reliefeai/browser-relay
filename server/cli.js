@@ -86,7 +86,38 @@ function restart() {
   start();
 }
 
-function status() {
+async function fix() {
+  // Diagnose current state
+  try {
+    const res = await fetch(`${RELAY_URL}/api/debug`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) {
+      const data = await res.json();
+      console.log(`relay: running  extension: ${data.connected ? "connected" : "not connected"}  tabs: ${data.tabCount ?? 0}`);
+    }
+  } catch {
+    console.log("relay: not responding");
+  }
+
+  // Restart clears all stale session state
+  console.log("Restarting relay server...");
+  restart();
+
+  // Poll until healthy
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const res = await fetch(`${RELAY_URL}/`, { signal: AbortSignal.timeout(1000) });
+      if (res.ok) {
+        console.log("Done. Extension will reconnect automatically within a few seconds.");
+        return;
+      }
+    } catch { /* keep waiting */ }
+  }
+  console.error("Relay server did not come back up. Check logs: browser-relay logs");
+  process.exit(1);
+}
+
+async function status() {
   let loaded = false;
   let pid = null;
   if (sys === "darwin") {
@@ -106,13 +137,20 @@ function status() {
   }
 
   let healthy = false;
+  let daemonVersion = null;
   try {
-    execSync(`curl -s --max-time 2 ${HEALTH_URL} > /dev/null`, { stdio: "ignore" });
-    healthy = true;
+    const res = await fetch(`${RELAY_URL}/api/debug`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) {
+      healthy = true;
+      daemonVersion = (await res.json())?.version ?? null;
+    }
   } catch {}
 
+  const cliVersion = JSON.parse(readFileSync(join(PKG_DIR, "package.json"), "utf-8")).version;
+  const outdated = daemonVersion && daemonVersion !== cliVersion;
   console.log(`Service:   ${loaded ? "loaded" : "not loaded"}${pid ? ` (pid ${pid})` : ""}`);
   console.log(`HTTP:      ${healthy ? "responding" : "not responding"} (${HEALTH_URL})`);
+  console.log(`Version:   cli ${cliVersion}, daemon ${daemonVersion ?? "unknown"}${outdated ? "  ← outdated, run: browser-relay restart" : ""}`);
   console.log(`Extension: ${EXTENSION_DIR}`);
   console.log(`Logs:      ${LOG_FILE}`);
   process.exit(loaded && healthy ? 0 : 1);
@@ -161,6 +199,7 @@ Commands:
   start       Start as a background service (launchd/systemd)
   stop        Stop the background service
   restart     Restart the background service
+  fix         Restart and clear stale session state (run when tabs won't connect)
   status      Show service + HTTP health
   logs        Tail the service logs
   path        Print the Chrome extension directory
@@ -174,6 +213,7 @@ Browser commands:
   snapshot    Print annotated page text
   click       Click an element by CSS selector
   type        Type text into an input or focused element
+  key         Press a key or keyboard shortcut
   scroll      Scroll the page
   screenshot  Save a PNG screenshot
   eval        Evaluate JavaScript in the page
@@ -426,6 +466,22 @@ async function browserApiCommand(cmd, args) {
       console.log("Typed.");
       return;
     }
+    case "key": {
+      const combo = requireValue(flagValue(flags, "key", "combo") || positional.join("+"), "key or combo is required");
+      const data = await relayRequest("POST", "/api/key", {
+        combo,
+        tabId: tabIdFrom(flags),
+        ctrl: flagBool(flags, "ctrl", "control"),
+        alt: flagBool(flags, "alt", "option"),
+        shift: flagBool(flags, "shift"),
+        meta: flagBool(flags, "meta", "cmd", "command"),
+        text: flagValue(flags, "text"),
+      });
+      ensureOk(data);
+      if (json) return printData(data, true);
+      console.log(`Pressed: ${combo}`);
+      return;
+    }
     case "scroll": {
       const direction = flagValue(flags, "direction") || positional[0] || "down";
       const amount = flagValue(flags, "amount");
@@ -532,6 +588,7 @@ function apiHelp() {
   snapshot [--tab id]          Print annotated page text
   click <selector>             Click a CSS selector
   type <text>                  Type text into the focused element
+  key <key|combo>              Press a key or combo (Enter, Escape, Control+L)
   scroll [down|up|top|bottom]  Scroll the page
   screenshot <file.png>        Save a PNG screenshot
   eval <js>                    Evaluate JavaScript in the page
@@ -553,6 +610,7 @@ Examples:
   browser-relay snapshot --tab ABC123 --max-length 20000
   browser-relay click 'button[type=submit]'
   browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+  browser-relay key Control+L
   browser-relay download-start https://example.com/file.pdf --filename files/file.pdf
   browser-relay downloads --limit 20
   browser-relay screenshot /tmp/page.png --full-page
@@ -570,7 +628,8 @@ switch (cmd) {
   case "start": start(); break;
   case "stop": stop(); break;
   case "restart": restart(); break;
-  case "status": status(); break;
+  case "fix": await fix(); break;
+  case "status": await status(); break;
   case "logs": logs(); break;
   case "path": path(); break;
   case "skill": skill(); break;
@@ -586,6 +645,7 @@ switch (cmd) {
   case "snapshot":
   case "click":
   case "type":
+  case "key":
   case "scroll":
   case "screenshot":
   case "eval":

@@ -26,6 +26,15 @@
   <label for="relayPort">Relay Server Port</label>
   <input type="number" id="relayPort" placeholder="18795" min="1" max="65535">
 
+  <label for="idleDetachSeconds">Idle auto-detach (seconds)</label>
+  <input type="number" id="idleDetachSeconds" placeholder="600" min="0" max="86400">
+  <p style="margin:6px 0 0; font-size:12px; color:#94a3b8;">
+    Detach the debugger from a tab after this many idle seconds so Chrome's
+    "started debugging this browser" bar disappears. It re-attaches automatically
+    on the next command. Set <code>0</code> to disable (bar always shown).
+    Trade-off: CDP events are not received while a tab is idle-detached.
+  </p>
+
   <button id="save">Save & Test Connection</button>
   <div id="status" class="status"></div>
 
