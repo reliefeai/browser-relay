@@ -60,6 +60,28 @@ const TOOLS = [
     handler: async (args) => relayPost("/api/navigate", args),
   },
   {
+    name: "browser_console",
+    description: "Read captured console.log/warn/error, page exceptions, and browser log entries from attached tabs. Use this to diagnose page behavior after interactions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string", description: "Tab targetId (optional)" },
+        level: { type: "string", description: "Filter by level, e.g. log, warning, error" },
+        limit: { type: "number", description: "Maximum entries to return (default: 100)" },
+        clear: { type: "boolean", description: "Clear returned entries after reading" },
+      },
+    },
+    handler: async (args) => {
+      const params = new URLSearchParams();
+      if (args.tabId) params.set("tabId", args.tabId);
+      if (args.level) params.set("level", args.level);
+      if (args.limit !== undefined) params.set("limit", String(args.limit));
+      if (args.clear) params.set("clear", "true");
+      const qs = params.toString();
+      return relayGet(`/api/console${qs ? "?" + qs : ""}`);
+    },
+  },
+  {
     name: "browser_snapshot",
     description: "Get a text representation of the page. Returns annotated text with clickable elements (links, buttons, inputs) marked for easy reference. Use this to understand what is on the page before interacting.",
     inputSchema: {

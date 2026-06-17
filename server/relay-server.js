@@ -17,6 +17,7 @@ const PING_INTERVAL_MS = 5_000;
 const COMMAND_TIMEOUT_MS = 30_000;
 const EXTENSION_GRACE_MS = 20_000;
 const MAX_BODY_SIZE = 64 * 1024; // 64KB
+const MAX_CONSOLE_ENTRIES = 1_000;
 const MAX_DOWNLOAD_ENTRIES = 1_000;
 
 const serverStartTime = Date.now();
@@ -45,6 +46,9 @@ let extensionRemoteAddress = null;
 const connectedTargets = new Map(); // sessionId -> { tabId, targetId, targetInfo }
 let nextExtensionId = 1;
 const pendingCommands = new Map();
+let nextConsoleEntryId = 1;
+let consoleEntries = [];
+const consoleEnabledSessions = new Set();
 let nextDownloadEntryId = 1;
 let downloadEntries = [];
 
@@ -121,6 +125,99 @@ function resolveTab(tabId) {
   return resolveSession(tabId);
 }
 
+function boundedNumber(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function targetForSession(sessionId) {
+  return connectedTargets.get(sessionId) || null;
+}
+
+function remoteObjectValue(obj) {
+  if (!obj || typeof obj !== "object") return "";
+  if ("value" in obj) return obj.value;
+  if ("unserializableValue" in obj) return obj.unserializableValue;
+  return obj.description || obj.type || "";
+}
+
+function stringifyConsoleValue(value) {
+  if (typeof value === "string") return value;
+  if (value === undefined) return "undefined";
+  try { return JSON.stringify(value); }
+  catch { return String(value); }
+}
+
+function appendConsoleEntry(entry) {
+  consoleEntries.push({ id: nextConsoleEntryId++, receivedAt: new Date().toISOString(), ...entry });
+  if (consoleEntries.length > MAX_CONSOLE_ENTRIES) {
+    consoleEntries = consoleEntries.slice(-MAX_CONSOLE_ENTRIES);
+  }
+}
+
+function appendConsoleEvent(sessionId, method, params = {}) {
+  const target = targetForSession(sessionId);
+  const base = {
+    sessionId: sessionId || "",
+    tabId: target?.targetId || "",
+    url: target?.targetInfo?.url || "",
+    title: target?.targetInfo?.title || "",
+  };
+
+  if (method === "Runtime.consoleAPICalled") {
+    const args = (params.args || []).map(remoteObjectValue);
+    appendConsoleEntry({
+      ...base,
+      source: "runtime",
+      level: params.type || "log",
+      text: args.map(stringifyConsoleValue).join(" "),
+      args,
+      stackTrace: params.stackTrace || null,
+      timestamp: params.timestamp || null,
+    });
+    return;
+  }
+
+  if (method === "Runtime.exceptionThrown") {
+    const details = params.exceptionDetails || {};
+    appendConsoleEntry({
+      ...base,
+      source: "runtime",
+      level: "error",
+      text: details.exception?.description || details.text || "Uncaught exception",
+      exceptionDetails: details,
+      timestamp: params.timestamp || null,
+    });
+    return;
+  }
+
+  if (method === "Log.entryAdded") {
+    const entry = params.entry || {};
+    appendConsoleEntry({
+      ...base,
+      source: entry.source || "log",
+      level: entry.level || "info",
+      text: entry.text || "",
+      lineNumber: entry.lineNumber,
+      url: entry.url || base.url,
+      networkRequestId: entry.networkRequestId,
+      timestamp: entry.timestamp || null,
+    });
+  }
+}
+
+async function enableConsoleCapture(sessionId) {
+  if (!sessionId || consoleEnabledSessions.has(sessionId)) return;
+  consoleEnabledSessions.add(sessionId);
+  try { await sendToExtension("Runtime.enable", {}, sessionId); }
+  catch (err) {
+    consoleEnabledSessions.delete(sessionId);
+    throw err;
+  }
+  await sendToExtension("Log.enable", {}, sessionId).catch(() => {});
+}
+
 // ---------------------------------------------------------------------------
 // Handle extension messages
 // ---------------------------------------------------------------------------
@@ -158,6 +255,15 @@ function onExtensionMessage(data) {
   if (msg?.method === "forwardCDPEvent") {
     const cdpMethod = msg.params?.method;
     const cdpParams = msg.params?.params;
+    const eventSessionId = msg.params?.sessionId;
+
+    if (eventSessionId && (
+      cdpMethod === "Runtime.consoleAPICalled" ||
+      cdpMethod === "Runtime.exceptionThrown" ||
+      cdpMethod === "Log.entryAdded"
+    )) {
+      appendConsoleEvent(eventSessionId, cdpMethod, cdpParams);
+    }
 
     if (cdpMethod === "BrowserRelay.downloadCreated") {
       appendDownloadEvent("created", cdpParams);
@@ -176,11 +282,12 @@ function onExtensionMessage(data) {
       const { sessionId, targetInfo } = cdpParams || {};
       if (sessionId && targetInfo?.targetId && (targetInfo?.type ?? "page") === "page") {
         connectedTargets.set(sessionId, { sessionId, targetId: targetInfo.targetId, targetInfo });
+        void enableConsoleCapture(sessionId).catch((err) => LOG.warn("console.enable.failed", { sessionId, error: err.message || String(err) }));
       }
     } else if (cdpMethod === "Target.detachedFromTarget") {
       const { sessionId, targetId } = cdpParams || {};
-      if (sessionId) connectedTargets.delete(sessionId);
-      else if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) connectedTargets.delete(sid); } }
+      if (sessionId) { connectedTargets.delete(sessionId); consoleEnabledSessions.delete(sessionId); }
+      else if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) { connectedTargets.delete(sid); consoleEnabledSessions.delete(sid); } } }
     } else if (cdpMethod === "Target.targetInfoChanged") {
       const info = cdpParams?.targetInfo;
       if (info?.targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === info.targetId) { connectedTargets.set(sid, { ...t, targetInfo: { ...t.targetInfo, ...info } }); } } }
@@ -211,12 +318,6 @@ async function readBody(req) {
   const raw = Buffer.concat(chunks).toString("utf-8");
   if (!raw.trim()) return {};
   try { return JSON.parse(raw); } catch { throw new Error("Invalid JSON in request body"); }
-}
-
-function boundedNumber(value, fallback, min, max) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
 }
 
 async function ensureExtension() {
@@ -340,6 +441,48 @@ async function handleTabs(_req, res) {
     tabs.push({ id: t.targetId, sessionId: t.sessionId, title: t.targetInfo?.title || "", url: t.targetInfo?.url || "" });
   }
   jsonResponse(res, 200, { ok: true, tabs });
+}
+
+async function handleConsole(req, res) {
+  await ensureExtension();
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const tabId = url.searchParams.get("tabId") || undefined;
+  const level = url.searchParams.get("level") || undefined;
+  const clear = url.searchParams.get("clear") === "true";
+  const limit = boundedNumber(url.searchParams.get("limit"), 100, 0, 1_000);
+
+  if (tabId) {
+    await enableConsoleCapture(resolveTab(tabId)).catch(() => {});
+  } else {
+    await Promise.all([...connectedTargets.keys()].map((sessionId) => enableConsoleCapture(sessionId).catch(() => {})));
+  }
+
+  let entries = consoleEntries;
+  if (tabId) entries = entries.filter((entry) => entry.tabId === tabId);
+  if (level) entries = entries.filter((entry) => entry.level === level);
+  const matchedTotal = entries.length;
+  const selected = limit === 0 ? [] : entries.slice(-limit);
+
+  if (clear) {
+    const ids = new Set(selected.map((entry) => entry.id));
+    consoleEntries = consoleEntries.filter((entry) => !ids.has(entry.id));
+  }
+
+  jsonResponse(res, 200, { ok: true, entries: selected, count: selected.length, total: matchedTotal, storedTotal: consoleEntries.length });
+}
+
+async function handleConsoleClear(req, res) {
+  await ensureExtension();
+  const body = await readBody(req);
+  const tabId = body.tabId;
+  const level = body.level;
+  const before = consoleEntries.length;
+  consoleEntries = consoleEntries.filter((entry) => {
+    if (tabId && entry.tabId !== tabId) return true;
+    if (level && entry.level !== level) return true;
+    return false;
+  });
+  jsonResponse(res, 200, { ok: true, cleared: before - consoleEntries.length, total: consoleEntries.length });
 }
 
 async function handleNavigate(req, res) {
@@ -615,6 +758,8 @@ const server = createServer(async (req, res) => {
 
     const routeMap = {
       "GET /api/tabs": handleTabs,
+      "GET /api/console": handleConsole,
+      "POST /api/console/clear": handleConsoleClear,
       "POST /api/navigate": handleNavigate,
       "POST /api/eval": handleEval,
       "GET /api/snapshot": handleSnapshot,

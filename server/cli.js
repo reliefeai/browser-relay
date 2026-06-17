@@ -211,6 +211,7 @@ Commands:
 Browser commands:
   tabs        List attached Chrome tabs
   snapshot    Print annotated page text
+  console     Print captured console, page error, and browser log entries
   click       Click an element by CSS selector
   type        Type text into an input or focused element
   key         Press a key or keyboard shortcut
@@ -384,6 +385,22 @@ function printTabs(data, json) {
   }
 }
 
+function printConsole(data, json) {
+  if (json) return printData(data, true);
+  const entries = data?.entries || [];
+  if (!entries.length) {
+    console.log("No console entries.");
+    return;
+  }
+  for (const entry of entries) {
+    const time = entry.receivedAt || "";
+    const level = entry.level || "log";
+    const text = entry.text || "";
+    const where = entry.tabId ? ` ${entry.tabId}` : "";
+    console.log(`[${time}] ${level}${where} ${text}`);
+  }
+}
+
 function printDownloads(data, json) {
   if (json) return printData(data, true);
   const downloads = data?.downloads || [];
@@ -416,6 +433,15 @@ async function browserApiCommand(cmd, args) {
     case "tabs":
     case "list": {
       return printTabs(await relayRequest("GET", "/api/tabs"), json);
+    }
+    case "console": {
+      const params = new URLSearchParams();
+      addParam(params, "tabId", tabIdFrom(flags));
+      addParam(params, "level", flagValue(flags, "level"));
+      addParam(params, "limit", flagValue(flags, "limit"));
+      if (flagBool(flags, "clear")) params.set("clear", "true");
+      const qs = params.toString();
+      return printConsole(await relayRequest("GET", `/api/console${qs ? `?${qs}` : ""}`), json);
     }
     case "navigate":
     case "go":
@@ -584,6 +610,7 @@ function apiHelp() {
   console.log(`Browser operation commands:
   tabs                         List attached Chrome tabs
   debug                        Show relay diagnostics
+  console [--tab id]           Print captured console/page errors
   navigate <url> [--tab id]    Navigate an attached tab
   snapshot [--tab id]          Print annotated page text
   click <selector>             Click a CSS selector
@@ -599,6 +626,8 @@ function apiHelp() {
 Common flags:
   --tab, -t <id>               Target tab id from 'browser-relay tabs'
   --json, -j                   Print JSON response
+  --level <level>              Filter console entries by level
+  --limit <n>                  Limit console entries
   --selector, -s <css>         Selector for click/type/download
   --filename <path>            Suggested download filename/path
   --save-as                    Ask Chrome to show the save-as dialog
@@ -607,6 +636,7 @@ Common flags:
 
 Examples:
   browser-relay tabs
+  browser-relay console --limit 50
   browser-relay snapshot --tab ABC123 --max-length 20000
   browser-relay click 'button[type=submit]'
   browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
@@ -638,6 +668,7 @@ switch (cmd) {
   case "uninstall": await uninstall(); break;
   case "tabs":
   case "list":
+  case "console":
   case "debug":
   case "navigate":
   case "go":
