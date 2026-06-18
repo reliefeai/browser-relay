@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn, execSync } from "node:child_process";
+import { spawn, spawnSync, execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -174,6 +174,82 @@ function skill() {
   console.log(`npx skills add "${skillDir}" -g`);
 }
 
+function packageInfo() {
+  return JSON.parse(readFileSync(join(PKG_DIR, "package.json"), "utf-8"));
+}
+
+function npmCommand() {
+  return sys === "win32" ? "npm.cmd" : "npm";
+}
+
+function packageSpec(packageName, target) {
+  if (!target || target === "latest") return `${packageName}@latest`;
+  if (target.includes("/")) return target;
+  return `${packageName}@${target}`;
+}
+
+function updateHelp() {
+  console.log(`Usage:
+  browser-relay update [version-or-tag]
+
+Examples:
+  browser-relay update
+  browser-relay update latest
+  browser-relay update 1.0.14
+
+Installs the requested Browser Relay npm package globally, refreshes the
+background service through postinstall, then prints status and follow-up hints.`);
+}
+
+async function update(args = []) {
+  if (args.includes("-h") || args.includes("--help")) {
+    updateHelp();
+    return;
+  }
+
+  const { positional } = parseArgs(args);
+  const pkg = packageInfo();
+  const target = positional[0] || "latest";
+  const spec = packageSpec(pkg.name, target);
+  const npm = npmCommand();
+
+  console.log(`Current: ${pkg.name}@${pkg.version}`);
+
+  const view = spawnSync(npm, ["view", spec, "version"], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (view.status === 0) {
+    const latest = view.stdout.trim();
+    if (latest) console.log(`Target:  ${pkg.name}@${latest}`);
+  } else {
+    const detail = (view.stderr || view.stdout || "").trim();
+    console.log(`Target:  ${spec}`);
+    if (detail) console.log(`npm view warning: ${detail.split("\n")[0]}`);
+  }
+
+  console.log(`Running: ${npm} install -g ${spec}`);
+  const installed = spawnSync(npm, ["install", "-g", spec], { stdio: "inherit" });
+  if (installed.error) throw installed.error;
+  if (installed.status !== 0) process.exit(installed.status ?? 1);
+
+  console.log("");
+  console.log("Update complete.");
+  console.log("");
+  console.log("Status:");
+  const statusCmd = sys === "win32" ? "browser-relay.cmd" : "browser-relay";
+  const checked = spawnSync(statusCmd, ["status"], { stdio: "inherit" });
+  if (checked.error || checked.status !== 0) {
+    console.log("Status check did not complete cleanly. Run: browser-relay status");
+  }
+
+  console.log("");
+  console.log("Next steps:");
+  console.log("  - If Chrome asks for new extension permissions, accept them.");
+  console.log("  - If the extension does not reconnect, reload it at chrome://extensions.");
+  console.log("  - If you installed the agent skill, update it with: $(browser-relay skill)");
+}
+
 function info() {
   console.log(`Browser Relay`);
   console.log(`Extension:  ${EXTENSION_DIR}`);
@@ -200,6 +276,7 @@ Commands:
   stop        Stop the background service
   restart     Restart the background service
   fix         Restart and clear stale session state (run when tabs won't connect)
+  update      Update the global npm package and refresh the service
   status      Show service + HTTP health
   logs        Tail the service logs
   path        Print the Chrome extension directory
@@ -659,6 +736,7 @@ switch (cmd) {
   case "stop": stop(); break;
   case "restart": restart(); break;
   case "fix": await fix(); break;
+  case "update": await update(process.argv.slice(3)); break;
   case "status": await status(); break;
   case "logs": logs(); break;
   case "path": path(); break;

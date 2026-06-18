@@ -97,7 +97,13 @@ chrome://extensions
 
 打开右上角开发者模式，点击 `Load unpacked`，选择 `browser-relay path` 输出的 `extension` 目录。
 
-升级是全自动的：执行 `npm install -g @linsoai/browser-relay@latest` 后，后台服务自动重启，扩展会在下次重连 relay 时（约 30 秒内）自动重载。可以用 `browser-relay status` 确认，它会同时显示 CLI 和 daemon 的版本。
+升级命令：
+
+```bash
+browser-relay update
+```
+
+它会全局安装 `@linsoai/browser-relay@latest`、刷新后台服务，并输出状态检查。扩展会在下次重连 relay 时（约 30 秒内）自动重载。可以用 `browser-relay status` 确认，它会同时显示 CLI 和 daemon 的版本。
 
 ### 3. 安装 Agent Skill
 
@@ -222,6 +228,7 @@ browser-relay start      # 启动后台服务
 browser-relay stop       # 停止后台服务
 browser-relay restart    # 重启后台服务
 browser-relay fix        # 重启并清理失效会话（标签页连不上时用）
+browser-relay update     # 更新全局 npm 包并刷新后台服务
 browser-relay status     # 查看服务状态和 HTTP 健康检查
 browser-relay logs       # 查看 /tmp/browser-relay.log
 browser-relay path       # 输出 Chrome 扩展目录

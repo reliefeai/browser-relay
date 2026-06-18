@@ -109,7 +109,13 @@ chrome://extensions
 
 Enable **Developer mode**, click **Load unpacked**, and select the `extension` directory printed by `browser-relay path`.
 
-Upgrades are hands-free: after `npm install -g @linsoai/browser-relay@latest`, the background service restarts automatically and the extension reloads itself the next time it reconnects to the relay (within ~30 seconds). Check with `browser-relay status`, which shows both the CLI and daemon versions.
+Upgrade with:
+
+```bash
+browser-relay update
+```
+
+This installs `@linsoai/browser-relay@latest` globally, refreshes the background service, and prints a status check. The extension reloads itself the next time it reconnects to the relay (within ~30 seconds). Check with `browser-relay status`, which shows both the CLI and daemon versions.
 
 ### 3. Install the Agent Skill
 
@@ -241,6 +247,7 @@ browser-relay start      # Start the background service
 browser-relay stop       # Stop the background service
 browser-relay restart    # Restart the background service
 browser-relay fix        # Restart and clear stale session state (when tabs won't connect)
+browser-relay update     # Update the global package and refresh the service
 browser-relay status     # Show service state and HTTP health
 browser-relay logs       # Tail /tmp/browser-relay.log
 browser-relay path       # Print the Chrome extension directory

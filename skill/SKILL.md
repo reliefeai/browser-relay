@@ -61,6 +61,12 @@ browser-relay screenshot /tmp/page.png --full-page --tab <tabId>
 browser-relay eval 'document.title' --tab <tabId>
 ```
 
+For maintenance, upgrade Browser Relay with:
+
+```bash
+browser-relay update
+```
+
 For long text or JavaScript, avoid shell escaping with stdin:
 
 ```bash
