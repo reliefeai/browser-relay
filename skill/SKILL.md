@@ -50,6 +50,7 @@ only when you need the full API response.
 ```bash
 browser-relay tabs
 browser-relay console --tab <tabId> --limit 50
+browser-relay network --tab <tabId> --type response --status 500 --limit 20
 browser-relay snapshot --tab <tabId> --max-length 20000
 browser-relay click 'button[type=submit]' --tab <tabId>
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --tab <tabId>
@@ -79,6 +80,15 @@ browser-relay eval --stdin --tab <tabId> < script.js
 The HTTP API below is for code, tests, custom tools, and low-level debugging.
 For interactive agent work, prefer the CLI workflow above.
 
+Errors are structured across HTTP, CLI `--json`, and MCP tool errors:
+
+```
+{ "ok": false, "code": "invalid_request", "error": "url is required", "message": "url is required", "status": 400, "retryable": false }
+```
+
+Agents should branch on `code` rather than matching localized/free-form error
+text. `retryable: true` means a reconnect/retry is reasonable.
+
 ### 1. browser_tabs
 List all attached browser tabs.
 ```
@@ -102,6 +112,18 @@ POST http://127.0.0.1:18795/api/console/clear
 Body: { "tabId?": "...", "level?": "error" }
 ```
 Use this after actions that may trigger frontend errors or warnings.
+
+### 2c. browser_network
+Read captured request/response/finished/failed network events. Sensitive
+headers such as `Authorization`, `Cookie`, `Proxy-Authorization`, and
+`Set-Cookie` are redacted; request bodies are not captured.
+```
+GET http://127.0.0.1:18795/api/network?tabId=<id>&type=response&status=500&limit=100&clear=false
+POST http://127.0.0.1:18795/api/network/clear
+Body: { "tabId?": "...", "type?": "request|response|finished|failed", "method?": "GET", "status?": 500, "requestId?": "...", "url?": "substring" }
+```
+Use this after actions that fail silently, after form submits, or when console
+errors imply an API request failed.
 
 ### 3. browser_snapshot
 Get a text representation of the current page (interactive elements annotated).
@@ -152,7 +174,9 @@ Capture a PNG screenshot (base64).
 ```
 POST/GET http://127.0.0.1:18795/api/screenshot?tabId=<id>&fullPage=true
 ```
-Returns: `{ ok: true, data: "base64...", format: "png" }`
+Full-page captures use layout metrics plus a clipped screenshot when possible,
+then fall back to Chrome's `captureBeyondViewport` path. Returns:
+`{ ok: true, data: "base64...", format: "png", fullPage, strategy, width?, height?, bytes }`
 
 ### 9. browser_eval
 Evaluate arbitrary JavaScript in the page. The escape hatch.
@@ -203,9 +227,10 @@ When asked to do something with a web page:
 4. **Plan actions** based on snapshot (click what, type where)
 5. **Execute** (`browser-relay click`, `browser-relay type`, `browser-relay key`, `browser-relay scroll`) one at a time
 6. **`browser-relay console`** if the page behaves unexpectedly or after risky actions
-7. **Re-snapshot** after each action to verify state
-8. **Use `browser-relay download-start` and `browser-relay downloads`** for real file downloads
-9. **Screenshot** if visual confirmation is needed
+7. **`browser-relay network`** if a request fails, hangs, or the UI changes without visible errors
+8. **Re-snapshot** after each action to verify state
+9. **Use `browser-relay download-start` and `browser-relay downloads`** for real file downloads
+10. **Screenshot** if visual confirmation is needed
 
 ## Example Session
 

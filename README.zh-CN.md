@@ -183,6 +183,12 @@ Browser Relay，或者当前环境没有 CLI 时，才直接使用 HTTP API。
 
 HTTP API 是给代码和自定义工具集成用的稳定接口。交互式 Agent 操作优先使用上面的 CLI。
 
+HTTP、CLI `--json` 和 MCP 工具错误都使用结构化错误格式：
+
+```json
+{ "ok": false, "code": "invalid_request", "error": "url is required", "message": "url is required", "status": 400, "retryable": false }
+```
+
 ```bash
 curl http://127.0.0.1:18795/api/tabs
 
@@ -204,13 +210,15 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/tabs` | GET | 列出已附加标签页 |
 | `/api/console` | GET | 读取 console 和页面错误记录 |
 | `/api/console/clear` | POST | 清理 console 记录 |
+| `/api/network` | GET | 读取已捕获的 Network 请求、响应和失败事件（敏感 header 已脱敏） |
+| `/api/network/clear` | POST | 清理已捕获的网络事件 |
 | `/api/navigate` | POST | 导航已附加标签页 |
 | `/api/snapshot` | GET | 获取页面文本快照或 HTML |
 | `/api/click` | POST | 按 CSS selector 点击元素 |
 | `/api/type` | POST | 输入文本 |
 | `/api/key` | POST | 按键或键盘快捷键 |
 | `/api/scroll` | POST | 滚动页面 |
-| `/api/screenshot` | GET/POST | 获取 PNG 截图 |
+| `/api/screenshot` | GET/POST | 获取 PNG 截图；full-page 会返回截图策略和尺寸元数据 |
 | `/api/eval` | POST | 执行页面内 JavaScript |
 | `/api/download` | POST | 获取元素 URL |
 | `/api/download/start` | POST | 从 URL 启动真实 Chrome 下载 |
@@ -238,6 +246,7 @@ browser-relay uninstall  # 卸载后台服务
 
 browser-relay tabs       # 列出已附加标签页
 browser-relay console    # 输出 console 和页面错误记录
+browser-relay network    # 输出网络请求、响应和失败事件
 browser-relay snapshot   # 输出页面结构化文本
 browser-relay click      # 按 CSS selector 点击元素
 browser-relay type       # 输入文本
@@ -250,6 +259,9 @@ browser-relay download-start # 启动 Chrome 下载
 browser-relay downloads      # 列出 Chrome 下载和事件
 browser-relay api-help   # 查看浏览器操作命令示例
 ```
+
+使用 `--json` 时，失败的 CLI 浏览器命令会输出结构化错误 JSON 并以非 0 状态退出，
+不会只打印纯文本错误。
 
 ## 配置
 

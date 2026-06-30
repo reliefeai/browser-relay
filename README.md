@@ -199,6 +199,12 @@ CLI is not available in the environment.
 The HTTP API is the stable integration surface for code and custom tools. For
 interactive agent work, prefer the CLI above.
 
+Errors use a structured shape across HTTP, CLI `--json`, and MCP tool errors:
+
+```json
+{ "ok": false, "code": "invalid_request", "error": "url is required", "message": "url is required", "status": 400, "retryable": false }
+```
+
 ```bash
 # List attached tabs
 curl http://127.0.0.1:18795/api/tabs
@@ -208,6 +214,9 @@ curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123"
 
 # Read captured console/page errors
 curl "http://127.0.0.1:18795/api/console?tabId=ABC123&limit=50"
+
+# Read captured network activity (sensitive headers are redacted)
+curl "http://127.0.0.1:18795/api/network?tabId=ABC123&type=response&status=500"
 
 # Click an element
 curl -X POST http://127.0.0.1:18795/api/click \
@@ -222,13 +231,15 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/tabs` | GET | List attached tabs |
 | `/api/console` | GET | Read captured console/page error entries |
 | `/api/console/clear` | POST | Clear captured console entries |
+| `/api/network` | GET | Read captured Network.* request/response/failure entries |
+| `/api/network/clear` | POST | Clear captured network entries |
 | `/api/navigate` | POST | Navigate an attached tab |
 | `/api/snapshot` | GET | Get annotated text or raw HTML |
 | `/api/click` | POST | Click an element by CSS selector |
 | `/api/type` | POST | Type into an input |
 | `/api/key` | POST | Press a key or keyboard shortcut |
 | `/api/scroll` | POST | Scroll the page |
-| `/api/screenshot` | GET/POST | Capture a PNG screenshot |
+| `/api/screenshot` | GET/POST | Capture a PNG screenshot; full-page mode returns capture strategy/size metadata |
 | `/api/eval` | POST | Evaluate JavaScript in the page |
 | `/api/download` | POST | Extract an element URL |
 | `/api/download/start` | POST | Start a real Chrome download from a URL |
@@ -257,6 +268,7 @@ browser-relay uninstall  # Unregister the background service
 
 browser-relay tabs       # List attached browser tabs
 browser-relay console    # Print captured console/page errors
+browser-relay network    # Print captured network requests/responses/failures
 browser-relay snapshot   # Print annotated page text
 browser-relay click      # Click an element by CSS selector
 browser-relay type       # Type text into the page
@@ -269,6 +281,9 @@ browser-relay download-start # Start a Chrome download
 browser-relay downloads      # List Chrome downloads and events
 browser-relay api-help   # Show browser command examples
 ```
+
+When `--json` is used, failed CLI browser commands print the structured error
+payload and exit non-zero instead of collapsing the response to plain text.
 
 Service files:
 

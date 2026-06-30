@@ -289,6 +289,7 @@ Browser commands:
   tabs        List attached Chrome tabs
   snapshot    Print annotated page text
   console     Print captured console, page error, and browser log entries
+  network     Print captured Network.* request/response/failure entries
   click       Click an element by CSS selector
   type        Type text into an input or focused element
   key         Press a key or keyboard shortcut
@@ -417,6 +418,36 @@ function addParam(params, name, value) {
   if (value !== undefined && value !== null && value !== "") params.set(name, String(value));
 }
 
+class RelayRequestError extends Error {
+  constructor(payload, fallbackMessage) {
+    super(errorMessage(payload, fallbackMessage));
+    this.name = "RelayRequestError";
+    this.payload = payload;
+    this.code = payload?.code;
+    this.status = payload?.status;
+  }
+}
+
+function errorMessage(payload, fallback = "Command failed") {
+  const message = payload?.message || payload?.error || fallback;
+  return payload?.code ? `${payload.code}: ${message}` : String(message);
+}
+
+function fallbackErrorPayload(message, options = {}) {
+  return {
+    ok: false,
+    code: options.code || "request_failed",
+    error: message,
+    message,
+    status: options.status ?? 0,
+    retryable: options.retryable === true,
+  };
+}
+
+function wantsJson(args) {
+  return args.includes("--json") || args.includes("-j");
+}
+
 async function relayRequest(method, path, body) {
   const url = `${RELAY_URL}${path}`;
   const options = { method, headers: { "Content-Type": "application/json" } };
@@ -427,7 +458,8 @@ async function relayRequest(method, path, body) {
     response = await fetch(url, options);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`Cannot reach Browser Relay at ${RELAY_URL}. Run: browser-relay start (${detail})`);
+    const message = `Cannot reach Browser Relay at ${RELAY_URL}. Run: browser-relay start (${detail})`;
+    throw new RelayRequestError(fallbackErrorPayload(message, { code: "relay_unreachable", retryable: true }), message);
   }
 
   const text = await response.text();
@@ -435,8 +467,10 @@ async function relayRequest(method, path, body) {
   try { data = text ? JSON.parse(text) : null; } catch { /* keep text */ }
 
   if (!response.ok) {
-    const message = data?.error || data?.message || `HTTP ${response.status}`;
-    throw new Error(String(message));
+    const payload = data && typeof data === "object"
+      ? data
+      : fallbackErrorPayload(`HTTP ${response.status}`, { code: "http_error", status: response.status });
+    throw new RelayRequestError(payload, `HTTP ${response.status}`);
   }
   return data;
 }
@@ -478,6 +512,24 @@ function printConsole(data, json) {
   }
 }
 
+function printNetwork(data, json) {
+  if (json) return printData(data, true);
+  const entries = data?.entries || [];
+  if (!entries.length) {
+    console.log("No network entries.");
+    return;
+  }
+  for (const entry of entries) {
+    const time = entry.receivedAt || "";
+    const type = entry.type || "network";
+    const method = entry.method || entry.request?.method || "";
+    const status = entry.status ?? entry.response?.status ?? "";
+    const url = entry.url || entry.request?.url || entry.response?.url || "";
+    const details = [method, status].filter((v) => v !== "").join(" ");
+    console.log(`[${time}] ${type}${details ? ` ${details}` : ""} ${url}`);
+  }
+}
+
 function printDownloads(data, json) {
   if (json) return printData(data, true);
   const downloads = data?.downloads || [];
@@ -495,8 +547,22 @@ function printDownloads(data, json) {
   }
 }
 
-function ensureOk(data) {
-  if (data?.ok === false) throw new Error(data.error || "Command failed");
+function ensureOk(data, json = false) {
+  if (data?.ok !== false) return;
+  if (json) {
+    printData(data, true);
+    process.exit(1);
+  }
+  throw new RelayRequestError(data, "Command failed");
+}
+
+function printCliError(err, args = []) {
+  if (wantsJson(args) && err?.payload) {
+    printData(err.payload, true);
+    process.exit(1);
+  }
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
 }
 
 async function browserApiCommand(cmd, args) {
@@ -520,12 +586,38 @@ async function browserApiCommand(cmd, args) {
       const qs = params.toString();
       return printConsole(await relayRequest("GET", `/api/console${qs ? `?${qs}` : ""}`), json);
     }
+    case "network": {
+      if (flagBool(flags, "clear")) {
+        const data = await relayRequest("POST", "/api/network/clear", {
+          tabId: tabIdFrom(flags),
+          type: flagValue(flags, "type"),
+          method: flagValue(flags, "method"),
+          status: flagValue(flags, "status"),
+          requestId: flagValue(flags, "request-id", "requestId"),
+          url: flagValue(flags, "url"),
+        });
+        ensureOk(data, json);
+        if (json) return printData(data, true);
+        console.log(`Cleared ${data.cleared || 0} network entries.`);
+        return;
+      }
+      const params = new URLSearchParams();
+      addParam(params, "tabId", tabIdFrom(flags));
+      addParam(params, "type", flagValue(flags, "type"));
+      addParam(params, "method", flagValue(flags, "method"));
+      addParam(params, "status", flagValue(flags, "status"));
+      addParam(params, "requestId", flagValue(flags, "request-id", "requestId"));
+      addParam(params, "url", flagValue(flags, "url"));
+      addParam(params, "limit", flagValue(flags, "limit"));
+      const qs = params.toString();
+      return printNetwork(await relayRequest("GET", `/api/network${qs ? `?${qs}` : ""}`), json);
+    }
     case "navigate":
     case "go":
     case "open": {
       const url = requireValue(flagValue(flags, "url") || positional[0], "url is required");
       const data = await relayRequest("POST", "/api/navigate", { url, tabId: tabIdFrom(flags) });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log(`${data.title || "(untitled)"}\n${data.url || url}`);
       return;
@@ -537,7 +629,7 @@ async function browserApiCommand(cmd, args) {
       addParam(params, "maxLength", flagValue(flags, "max-length", "maxLength"));
       const qs = params.toString();
       const data = await relayRequest("GET", `/api/snapshot${qs ? `?${qs}` : ""}`);
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log(data.html ?? data.snapshot ?? "");
       return;
@@ -550,7 +642,7 @@ async function browserApiCommand(cmd, args) {
         doubleClick: flagBool(flags, "double", "double-click", "doubleClick"),
         button: flagValue(flags, "button"),
       });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log(`Clicked: ${data.elementText || selector}`);
       return;
@@ -564,7 +656,7 @@ async function browserApiCommand(cmd, args) {
         clear: flagBool(flags, "clear"),
         submit: flagBool(flags, "submit"),
       });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log("Typed.");
       return;
@@ -580,7 +672,7 @@ async function browserApiCommand(cmd, args) {
         meta: flagBool(flags, "meta", "cmd", "command"),
         text: flagValue(flags, "text"),
       });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log(`Pressed: ${combo}`);
       return;
@@ -593,7 +685,7 @@ async function browserApiCommand(cmd, args) {
         amount: amount === undefined ? undefined : Number(amount),
         tabId: tabIdFrom(flags),
       });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log(`Scrolled: ${data.direction || direction}`);
       return;
@@ -604,7 +696,7 @@ async function browserApiCommand(cmd, args) {
       addParam(params, "tabId", tabIdFrom(flags));
       if (flagBool(flags, "full-page", "fullPage")) params.set("fullPage", "true");
       const data = await relayRequest("GET", `/api/screenshot?${params.toString()}`);
-      ensureOk(data);
+      ensureOk(data, json);
       const buf = Buffer.from(data.data || "", "base64");
       if (json) return printData({ ...data, bytes: buf.length }, true);
       if (flagBool(flags, "base64")) {
@@ -623,7 +715,7 @@ async function browserApiCommand(cmd, args) {
     case "eval": {
       const expression = readInput(flags, positional, "expression", "expression");
       const data = await relayRequest("POST", "/api/eval", { expression, tabId: tabIdFrom(flags) });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       if (data.exceptionDetails) {
         console.error(JSON.stringify(data.exceptionDetails, null, 2));
@@ -641,7 +733,7 @@ async function browserApiCommand(cmd, args) {
     case "download": {
       const selector = requireValue(flagValue(flags, "selector") || positional.join(" "), "selector is required");
       const data = await relayRequest("POST", "/api/download", { selector, tabId: tabIdFrom(flags) });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       if (!data.found) throw new Error(`Element not found: ${selector}`);
       console.log(data.url || "");
@@ -655,7 +747,7 @@ async function browserApiCommand(cmd, args) {
         saveAs: flagBool(flags, "save-as", "saveAs"),
         conflictAction: flagValue(flags, "conflict-action", "conflictAction"),
       });
-      ensureOk(data);
+      ensureOk(data, json);
       if (json) return printData(data, true);
       console.log(`Started download: ${data.downloadId ?? data.id}`);
       return;
@@ -663,7 +755,7 @@ async function browserApiCommand(cmd, args) {
     case "downloads": {
       if (flagBool(flags, "clear")) {
         const data = await relayRequest("POST", "/api/downloads/clear", {});
-        ensureOk(data);
+        ensureOk(data, json);
         if (json) return printData(data, true);
         console.log(`Cleared ${data.cleared || 0} download events.`);
         return;
@@ -688,6 +780,7 @@ function apiHelp() {
   tabs                         List attached Chrome tabs
   debug                        Show relay diagnostics
   console [--tab id]           Print captured console/page errors
+  network [--tab id]           Print captured network events
   navigate <url> [--tab id]    Navigate an attached tab
   snapshot [--tab id]          Print annotated page text
   click <selector>             Click a CSS selector
@@ -714,6 +807,7 @@ Common flags:
 Examples:
   browser-relay tabs
   browser-relay console --limit 50
+  browser-relay network --type response --status 500 --limit 20
   browser-relay snapshot --tab ABC123 --max-length 20000
   browser-relay click 'button[type=submit]'
   browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
@@ -747,6 +841,7 @@ switch (cmd) {
   case "tabs":
   case "list":
   case "console":
+  case "network":
   case "debug":
   case "navigate":
   case "go":
@@ -762,7 +857,7 @@ switch (cmd) {
   case "download-start":
   case "downloads":
     try { await browserApiCommand(cmd, process.argv.slice(3)); }
-    catch (err) { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); }
+    catch (err) { printCliError(err, process.argv.slice(3)); }
     break;
   case "-h":
   case "--help":

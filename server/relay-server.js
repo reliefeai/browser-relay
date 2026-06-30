@@ -19,6 +19,7 @@ const EXTENSION_GRACE_MS = 20_000;
 const MAX_BODY_SIZE = 64 * 1024; // 64KB
 const MAX_CONSOLE_ENTRIES = 1_000;
 const MAX_DOWNLOAD_ENTRIES = 1_000;
+const MAX_NETWORK_ENTRIES = 1_000;
 
 const serverStartTime = Date.now();
 
@@ -36,6 +37,17 @@ const LOG = {
   error: (event, data) => log(event, "error", data),
 };
 
+class ApiError extends Error {
+  constructor(status, code, message, { retryable = false, details = undefined } = {}) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.retryable = retryable;
+    this.details = details;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Extension WebSocket state
 // ---------------------------------------------------------------------------
@@ -49,6 +61,9 @@ const pendingCommands = new Map();
 let nextConsoleEntryId = 1;
 let consoleEntries = [];
 const consoleEnabledSessions = new Set();
+let nextNetworkEntryId = 1;
+let networkEntries = [];
+const networkEnabledSessions = new Set();
 let nextDownloadEntryId = 1;
 let downloadEntries = [];
 
@@ -92,11 +107,16 @@ function waitForExtension(timeoutMs = 3_000) {
 // ---------------------------------------------------------------------------
 function sendToExtension(method, params, sessionId) {
   const ws = extensionWs;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Extension not connected"));
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    return Promise.reject(new ApiError(503, "extension_not_connected", "Extension not connected", { retryable: true }));
+  }
   const id = nextExtensionId++;
   const payload = { id, method: "forwardCDPCommand", params: { method, params, ...(sessionId ? { sessionId } : {}) } };
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { pendingCommands.delete(id); reject(new Error(`CDP command timeout: ${method}`)); }, COMMAND_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      pendingCommands.delete(id);
+      reject(new ApiError(504, "cdp_timeout", `CDP command timeout: ${method}`, { retryable: true, details: { method } }));
+    }, COMMAND_TIMEOUT_MS);
     pendingCommands.set(id, {
       resolve: (v) => { clearTimeout(timer); resolve(v); },
       reject: (e) => { clearTimeout(timer); reject(e); },
@@ -113,11 +133,11 @@ function sendToExtension(method, params, sessionId) {
 function resolveSession(targetId) {
   if (targetId) {
     for (const t of connectedTargets.values()) { if (t.targetId === targetId) return t.sessionId; }
-    throw new Error(`No attached tab with targetId: ${targetId}`);
+    throw new ApiError(404, "tab_not_found", `No attached tab with targetId: ${targetId}`, { details: { targetId } });
   }
   let last = null;
   for (const t of connectedTargets.values()) last = t;
-  if (!last) throw new Error("No attached tabs. Install the Browser Relay extension and open a tab.");
+  if (!last) throw new ApiError(409, "no_attached_tabs", "No attached tabs. Install the Browser Relay extension and open a tab.", { retryable: true });
   return last.sessionId;
 }
 
@@ -207,6 +227,108 @@ function appendConsoleEvent(sessionId, method, params = {}) {
   }
 }
 
+const SENSITIVE_NETWORK_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "set-cookie",
+]);
+
+function redactNetworkHeaders(headers = {}) {
+  const redacted = {};
+  if (!headers || typeof headers !== "object") return redacted;
+  for (const [name, value] of Object.entries(headers)) {
+    redacted[name] = SENSITIVE_NETWORK_HEADERS.has(String(name).toLowerCase()) ? "[redacted]" : value;
+  }
+  return redacted;
+}
+
+function appendNetworkEntry(entry) {
+  networkEntries.push({ id: nextNetworkEntryId++, receivedAt: new Date().toISOString(), ...entry });
+  if (networkEntries.length > MAX_NETWORK_ENTRIES) {
+    networkEntries = networkEntries.slice(-MAX_NETWORK_ENTRIES);
+  }
+}
+
+function appendNetworkEvent(sessionId, method, params = {}) {
+  const target = targetForSession(sessionId);
+  const base = {
+    sessionId: sessionId || "",
+    tabId: target?.targetId || "",
+    pageUrl: target?.targetInfo?.url || "",
+    title: target?.targetInfo?.title || "",
+    requestId: params.requestId || "",
+    timestamp: params.timestamp ?? null,
+  };
+
+  if (method === "Network.requestWillBeSent") {
+    const request = params.request || {};
+    appendNetworkEntry({
+      ...base,
+      type: "request",
+      url: request.url || params.documentURL || "",
+      method: request.method || "",
+      documentURL: params.documentURL || "",
+      frameId: params.frameId || "",
+      resourceType: params.type || "",
+      wallTime: params.wallTime ?? null,
+      initiator: params.initiator || null,
+      request: {
+        url: request.url || "",
+        method: request.method || "",
+        headers: redactNetworkHeaders(request.headers),
+      },
+    });
+    return;
+  }
+
+  if (method === "Network.responseReceived") {
+    const response = params.response || {};
+    appendNetworkEntry({
+      ...base,
+      type: "response",
+      url: response.url || "",
+      status: response.status ?? null,
+      statusText: response.statusText || "",
+      mimeType: response.mimeType || "",
+      protocol: response.protocol || "",
+      remoteIPAddress: response.remoteIPAddress || "",
+      remotePort: response.remotePort ?? null,
+      fromDiskCache: !!response.fromDiskCache,
+      fromServiceWorker: !!response.fromServiceWorker,
+      resourceType: params.type || "",
+      response: {
+        url: response.url || "",
+        status: response.status ?? null,
+        statusText: response.statusText || "",
+        headers: redactNetworkHeaders(response.headers),
+        mimeType: response.mimeType || "",
+      },
+    });
+    return;
+  }
+
+  if (method === "Network.loadingFinished") {
+    appendNetworkEntry({
+      ...base,
+      type: "finished",
+      encodedDataLength: params.encodedDataLength ?? null,
+    });
+    return;
+  }
+
+  if (method === "Network.loadingFailed") {
+    appendNetworkEntry({
+      ...base,
+      type: "failed",
+      resourceType: params.type || "",
+      errorText: params.errorText || "",
+      canceled: !!params.canceled,
+      blockedReason: params.blockedReason || "",
+    });
+  }
+}
+
 async function enableConsoleCapture(sessionId) {
   if (!sessionId || consoleEnabledSessions.has(sessionId)) return;
   consoleEnabledSessions.add(sessionId);
@@ -216,6 +338,16 @@ async function enableConsoleCapture(sessionId) {
     throw err;
   }
   await sendToExtension("Log.enable", {}, sessionId).catch(() => {});
+}
+
+async function enableNetworkCapture(sessionId) {
+  if (!sessionId || networkEnabledSessions.has(sessionId)) return;
+  networkEnabledSessions.add(sessionId);
+  try { await sendToExtension("Network.enable", {}, sessionId); }
+  catch (err) {
+    networkEnabledSessions.delete(sessionId);
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +397,15 @@ function onExtensionMessage(data) {
       appendConsoleEvent(eventSessionId, cdpMethod, cdpParams);
     }
 
+    if (eventSessionId && (
+      cdpMethod === "Network.requestWillBeSent" ||
+      cdpMethod === "Network.responseReceived" ||
+      cdpMethod === "Network.loadingFinished" ||
+      cdpMethod === "Network.loadingFailed"
+    )) {
+      appendNetworkEvent(eventSessionId, cdpMethod, cdpParams);
+    }
+
     if (cdpMethod === "BrowserRelay.downloadCreated") {
       appendDownloadEvent("created", cdpParams);
       return;
@@ -283,17 +424,18 @@ function onExtensionMessage(data) {
       if (sessionId && targetInfo?.targetId && (targetInfo?.type ?? "page") === "page") {
         connectedTargets.set(sessionId, { sessionId, targetId: targetInfo.targetId, targetInfo });
         void enableConsoleCapture(sessionId).catch((err) => LOG.warn("console.enable.failed", { sessionId, error: err.message || String(err) }));
+        void enableNetworkCapture(sessionId).catch((err) => LOG.warn("network.enable.failed", { sessionId, error: err.message || String(err) }));
       }
     } else if (cdpMethod === "Target.detachedFromTarget") {
       const { sessionId, targetId } = cdpParams || {};
-      if (sessionId) { connectedTargets.delete(sessionId); consoleEnabledSessions.delete(sessionId); }
-      else if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) { connectedTargets.delete(sid); consoleEnabledSessions.delete(sid); } } }
+      if (sessionId) { connectedTargets.delete(sessionId); consoleEnabledSessions.delete(sessionId); networkEnabledSessions.delete(sessionId); }
+      else if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) { connectedTargets.delete(sid); consoleEnabledSessions.delete(sid); networkEnabledSessions.delete(sid); } } }
     } else if (cdpMethod === "Target.targetInfoChanged") {
       const info = cdpParams?.targetInfo;
       if (info?.targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === info.targetId) { connectedTargets.set(sid, { ...t, targetInfo: { ...t.targetInfo, ...info } }); } } }
     } else if (cdpMethod === "Target.targetDestroyed" || cdpMethod === "Target.targetCrashed") {
       const targetId = cdpParams?.targetId;
-      if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) connectedTargets.delete(sid); } }
+      if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) { connectedTargets.delete(sid); consoleEnabledSessions.delete(sid); networkEnabledSessions.delete(sid); } } }
     }
   }
 }
@@ -306,24 +448,77 @@ function jsonResponse(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) });
   res.end(payload);
 }
-function errorResponse(res, status, message) { jsonResponse(res, status, { ok: false, error: message }); }
+
+function defaultErrorCode(status, message) {
+  if (status === 400) return "bad_request";
+  if (status === 404) return String(message).startsWith("Unknown API endpoint:") ? "endpoint_not_found" : "not_found";
+  if (status === 503) return "service_unavailable";
+  return "internal_error";
+}
+
+function errorResponse(res, status, message, options = {}) {
+  const code = options.code || defaultErrorCode(status, message);
+  const body = {
+    ok: false,
+    error: message,
+    message,
+    code,
+    status,
+    retryable: options.retryable === true,
+  };
+  if (options.details !== undefined) body.details = options.details;
+  jsonResponse(res, status, body);
+}
+
+function writeError(res, err) {
+  if (err instanceof ApiError) {
+    return errorResponse(res, err.status, err.message, {
+      code: err.code,
+      retryable: err.retryable,
+      details: err.details,
+    });
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return errorResponse(res, 500, message, { code: "internal_error" });
+}
+
+function validationError(res, message, field) {
+  return errorResponse(res, 400, message, {
+    code: "invalid_request",
+    details: field ? { field } : undefined,
+  });
+}
+
+function elementNotFound(selector) {
+  return {
+    ok: false,
+    error: `Element not found: ${selector}`,
+    message: `Element not found: ${selector}`,
+    code: "element_not_found",
+    status: 200,
+    retryable: false,
+    details: { selector },
+  };
+}
 
 async function readBody(req) {
   const chunks = []; let totalSize = 0;
   for await (const chunk of req) {
     totalSize += chunk.length;
-    if (totalSize > MAX_BODY_SIZE) throw new Error("Request body too large (max 64KB)");
+    if (totalSize > MAX_BODY_SIZE) throw new ApiError(413, "request_body_too_large", "Request body too large (max 64KB)");
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf-8");
   if (!raw.trim()) return {};
-  try { return JSON.parse(raw); } catch { throw new Error("Invalid JSON in request body"); }
+  try { return JSON.parse(raw); } catch { throw new ApiError(400, "invalid_json", "Invalid JSON in request body"); }
 }
 
 async function ensureExtension() {
   if (extensionConnected()) return;
   const reconnected = await waitForExtension(3_000);
-  if (!reconnected || !extensionConnected()) { throw new Error("Extension not connected. Is the browser running with the extension?"); }
+  if (!reconnected || !extensionConnected()) {
+    throw new ApiError(503, "extension_not_connected", "Extension not connected. Is the browser running with the extension?", { retryable: true });
+  }
 }
 
 const NAMED_KEYS = {
@@ -485,11 +680,69 @@ async function handleConsoleClear(req, res) {
   jsonResponse(res, 200, { ok: true, cleared: before - consoleEntries.length, total: consoleEntries.length });
 }
 
-async function handleNavigate(req, res) {
+function filteredNetworkEntries(filters) {
+  let entries = networkEntries;
+  if (filters.tabId) entries = entries.filter((entry) => entry.tabId === filters.tabId || entry.sessionId === filters.tabId);
+  if (filters.type) entries = entries.filter((entry) => entry.type === filters.type);
+  if (filters.method) entries = entries.filter((entry) => String(entry.method || entry.request?.method || "").toUpperCase() === String(filters.method).toUpperCase());
+  if (filters.status) entries = entries.filter((entry) => Number(entry.status ?? entry.response?.status) === Number(filters.status));
+  if (filters.requestId) entries = entries.filter((entry) => entry.requestId === filters.requestId);
+  if (filters.url) entries = entries.filter((entry) => String(entry.url || entry.request?.url || entry.response?.url || "").includes(filters.url));
+  return entries;
+}
+
+async function handleNetwork(req, res) {
+  await ensureExtension();
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  await Promise.all([...connectedTargets.keys()].map((sessionId) => enableNetworkCapture(sessionId).catch(() => {})));
+
+  const filters = {
+    tabId: url.searchParams.get("tabId") || undefined,
+    type: url.searchParams.get("type") || undefined,
+    method: url.searchParams.get("method") || undefined,
+    status: url.searchParams.get("status") || undefined,
+    requestId: url.searchParams.get("requestId") || undefined,
+    url: url.searchParams.get("url") || undefined,
+  };
+  const clear = url.searchParams.get("clear") === "true";
+  const limit = boundedNumber(url.searchParams.get("limit"), 100, 0, MAX_NETWORK_ENTRIES);
+  const matched = filteredNetworkEntries(filters);
+  const selected = limit === 0 ? [] : matched.slice(-limit);
+
+  if (clear) {
+    const ids = new Set(selected.map((entry) => entry.id));
+    networkEntries = networkEntries.filter((entry) => !ids.has(entry.id));
+  }
+
+  jsonResponse(res, 200, { ok: true, entries: selected, count: selected.length, total: matched.length, storedTotal: networkEntries.length });
+}
+
+async function handleNetworkClear(req, res) {
   await ensureExtension();
   const body = await readBody(req);
+  const filters = {
+    tabId: body.tabId,
+    type: body.type,
+    method: body.method,
+    status: body.status,
+    requestId: body.requestId,
+    url: body.url,
+  };
+  const before = networkEntries.length;
+  if (Object.values(filters).some((value) => value !== undefined && value !== null && value !== "")) {
+    const ids = new Set(filteredNetworkEntries(filters).map((entry) => entry.id));
+    networkEntries = networkEntries.filter((entry) => !ids.has(entry.id));
+  } else {
+    networkEntries = [];
+  }
+  jsonResponse(res, 200, { ok: true, cleared: before - networkEntries.length, total: networkEntries.length });
+}
+
+async function handleNavigate(req, res) {
+  const body = await readBody(req);
   const url = body.url;
-  if (!url || typeof url !== "string") return errorResponse(res, 400, "url is required");
+  if (!url || typeof url !== "string") return validationError(res, "url is required", "url");
+  await ensureExtension();
   const sessionId = resolveTab(body.tabId);
   const result = await sendToExtension("Page.navigate", { url }, sessionId);
   await new Promise((r) => setTimeout(r, 500));
@@ -504,10 +757,10 @@ async function handleNavigate(req, res) {
 }
 
 async function handleEval(req, res) {
-  await ensureExtension();
   const body = await readBody(req);
   const expression = body.expression;
-  if (!expression || typeof expression !== "string") return errorResponse(res, 400, "expression is required");
+  if (!expression || typeof expression !== "string") return validationError(res, "expression is required", "expression");
+  await ensureExtension();
   const sessionId = resolveTab(body.tabId);
   const returnByValue = body.returnByValue !== false;
   const result = await sendToExtension("Runtime.evaluate", { expression, returnByValue, awaitPromise: true }, sessionId);
@@ -545,16 +798,16 @@ async function handleSnapshot(req, res) {
 }
 
 async function handleClick(req, res) {
-  await ensureExtension();
   const body = await readBody(req);
   const selector = body.selector;
-  if (!selector || typeof selector !== "string") return errorResponse(res, 400, "selector is required");
+  if (!selector || typeof selector !== "string") return validationError(res, "selector is required", "selector");
+  await ensureExtension();
   const sessionId = resolveTab(body.tabId);
 
   const findJs = `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return JSON.stringify({ found: false }); var rect = el.getBoundingClientRect(); return JSON.stringify({ found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (el.innerText || el.textContent || '').trim().slice(0, 100) }); })()`;
   const findResult = await sendToExtension("Runtime.evaluate", { expression: findJs, returnByValue: true }, sessionId);
   const elInfo = JSON.parse(findResult?.result?.value || '{\"found\":false}');
-  if (!elInfo.found) return jsonResponse(res, 200, { ok: false, error: `Element not found: ${selector}` });
+  if (!elInfo.found) return jsonResponse(res, 200, elementNotFound(selector));
 
   const button = body.button || "left";
   const clickCount = body.doubleClick ? 2 : 1;
@@ -575,10 +828,10 @@ async function handleClick(req, res) {
 }
 
 async function handleType(req, res) {
-  await ensureExtension();
   const body = await readBody(req);
   const text = body.text;
-  if (typeof text !== "string") return errorResponse(res, 400, "text is required");
+  if (typeof text !== "string") return validationError(res, "text is required", "text");
+  await ensureExtension();
   const sessionId = resolveTab(body.tabId);
   const selector = body.selector;
   const submit = body.submit || false;
@@ -588,7 +841,7 @@ async function handleType(req, res) {
     const focusJs = `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return JSON.stringify({ found: false }); el.focus(); return JSON.stringify({ found: true }); })()`;
     const focusResult = await sendToExtension("Runtime.evaluate", { expression: focusJs, returnByValue: true }, sessionId);
     const info = JSON.parse(focusResult?.result?.value || '{\"found\":false}');
-    if (!info.found) return jsonResponse(res, 200, { ok: false, error: `Element not found: ${selector}` });
+    if (!info.found) return jsonResponse(res, 200, elementNotFound(selector));
   }
 
   if (clear) {
@@ -611,7 +864,7 @@ async function handleType(req, res) {
 async function handleKey(req, res) {
   const body = await readBody(req);
   const input = normalizeKeyInput(body);
-  if (!input) return errorResponse(res, 400, "key or combo is required");
+  if (!input) return validationError(res, "key or combo is required", "key");
   await ensureExtension();
   const sessionId = resolveTab(body.tabId);
   await dispatchKeyPress(sessionId, input);
@@ -625,8 +878,39 @@ async function handleScreenshot(req, res) {
   const tabId = body.tabId || url.searchParams.get("tabId") || undefined;
   const fullPage = body.fullPage === true || url.searchParams.get("fullPage") === "true";
   const sessionId = resolveTab(tabId);
-  const result = await sendToExtension("Page.captureScreenshot", { format: "png", captureBeyondViewport: fullPage }, sessionId);
-  jsonResponse(res, 200, { ok: true, data: result?.data || "", format: "png" });
+  let fallbackError = null;
+
+  if (fullPage) {
+    let width = null;
+    let height = null;
+    try {
+      const metrics = await sendToExtension("Page.getLayoutMetrics", {}, sessionId);
+      const size = metrics?.cssContentSize || metrics?.contentSize || metrics?.cssLayoutViewport || metrics?.layoutViewport;
+      const rawWidth = Number(size?.width);
+      const rawHeight = Number(size?.height);
+      if (Number.isFinite(rawWidth) && Number.isFinite(rawHeight) && rawWidth > 0 && rawHeight > 0) {
+        width = Math.ceil(rawWidth);
+        height = Math.ceil(rawHeight);
+        const result = await sendToExtension("Page.captureScreenshot", {
+          format: "png",
+          captureBeyondViewport: true,
+          clip: { x: 0, y: 0, width, height, scale: 1 },
+        }, sessionId);
+        const data = result?.data || "";
+        return jsonResponse(res, 200, { ok: true, data, format: "png", fullPage: true, strategy: "fullPageClip", width, height, bytes: Buffer.byteLength(data, "base64") });
+      }
+    } catch (err) {
+      fallbackError = err instanceof Error ? err.message : String(err);
+    }
+
+    const result = await sendToExtension("Page.captureScreenshot", { format: "png", captureBeyondViewport: true }, sessionId);
+    const data = result?.data || "";
+    return jsonResponse(res, 200, { ok: true, data, format: "png", fullPage: true, strategy: "captureBeyondViewport", width, height, bytes: Buffer.byteLength(data, "base64"), fallbackError });
+  }
+
+  const result = await sendToExtension("Page.captureScreenshot", { format: "png", captureBeyondViewport: false }, sessionId);
+  const data = result?.data || "";
+  jsonResponse(res, 200, { ok: true, data, format: "png", fullPage: false, strategy: "viewport", bytes: Buffer.byteLength(data, "base64") });
 }
 
 async function handleScroll(req, res) {
@@ -645,23 +929,25 @@ async function handleScroll(req, res) {
 }
 
 async function handleDownload(req, res) {
-  await ensureExtension();
   const body = await readBody(req);
   const selector = body.selector;
-  if (!selector || typeof selector !== "string") return errorResponse(res, 400, "selector is required (e.g. 'img[src=...]' or 'a[href=...]')");
+  if (!selector || typeof selector !== "string") return validationError(res, "selector is required (e.g. 'img[src=...]' or 'a[href=...]')", "selector");
+  await ensureExtension();
   const sessionId = resolveTab(body.tabId);
   const result = await sendToExtension("Runtime.evaluate", {
     expression: `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return { found: false }; var url = el.src || el.href || ''; var tag = el.tagName; return { found: true, url, tag }; })()`,
     returnByValue: true,
   }, sessionId);
-  jsonResponse(res, 200, { ok: true, ...result?.result?.value });
+  const data = result?.result?.value || { found: false };
+  if (!data.found) return jsonResponse(res, 200, elementNotFound(selector));
+  jsonResponse(res, 200, { ok: true, ...data });
 }
 
 async function handleDownloadStart(req, res) {
-  await ensureExtension();
   const body = await readBody(req);
   const url = typeof body.url === "string" ? body.url.trim() : "";
-  if (!url) return errorResponse(res, 400, "url is required");
+  if (!url) return validationError(res, "url is required", "url");
+  await ensureExtension();
 
   const options = { url };
   if (typeof body.filename === "string" && body.filename.trim()) options.filename = body.filename;
@@ -760,6 +1046,8 @@ const server = createServer(async (req, res) => {
       "GET /api/tabs": handleTabs,
       "GET /api/console": handleConsole,
       "POST /api/console/clear": handleConsoleClear,
+      "GET /api/network": handleNetwork,
+      "POST /api/network/clear": handleNetworkClear,
       "POST /api/navigate": handleNavigate,
       "POST /api/eval": handleEval,
       "GET /api/snapshot": handleSnapshot,
@@ -785,8 +1073,9 @@ const server = createServer(async (req, res) => {
       try { await handler(req, res); }
       catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        LOG.error("api.error", { path, error: message });
-        errorResponse(res, 500, message);
+        const status = err instanceof ApiError ? err.status : 500;
+        LOG.error("api.error", { path, status, error: message });
+        writeError(res, err);
       }
       return;
     }
@@ -846,7 +1135,11 @@ wss.on("connection", (ws, req) => {
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
     if (extensionWs !== ws) return;
     extensionWs = null;
-    for (const [id, pending] of pendingCommands) { clearTimeout(pending.timer); pending.reject(new Error("Extension disconnected")); pendingCommands.delete(id); }
+    for (const [id, pending] of pendingCommands) {
+      clearTimeout(pending.timer);
+      pending.reject(new ApiError(503, "extension_disconnected", "Extension disconnected", { retryable: true }));
+      pendingCommands.delete(id);
+    }
     scheduleGraceCleanup();
   });
 
