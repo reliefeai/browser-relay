@@ -19,60 +19,49 @@
 <p align="center">
   <a href="#quick-start">Quick Start</a>
   ·
-  <a href="#agent-friendly-by-default">Agent Friendly</a>
+  <a href="#cli">CLI</a>
+  ·
+  <a href="#remote-control-remote-relay">Remote</a>
   ·
   <a href="#http-api">HTTP API</a>
   ·
   <a href="README.zh-CN.md">中文</a>
 </p>
 
-Browser Relay is a local browser-control bridge for AI agents. It connects your existing Chrome session to agents through HTTP API or MCP, so they can read pages, click buttons, type into forms, scroll, take screenshots, and evaluate JavaScript in the same browser where you are already logged in.
+Browser Relay connects your real, logged-in Chrome to AI agents — over a plain CLI, MCP, or HTTP. Agents work inside the tabs you already have open, **locally or from another machine**, instead of a throwaway automation profile or a headless browser. No cloud browser, no separate automation window, no surprise tabs.
 
-No cloud browser. No throwaway automation profile. No surprise browser windows or new tabs. Browser Relay works with the Chrome tabs you already have open, and normal navigation reuses an attached tab instead of launching a separate browser.
+## Real Chrome, not a throwaway profile
 
-## Why Browser Relay
+Most browser automation spins up a fresh, empty browser profile. That is fine for testing, but useless for agents that need your **authenticated** web apps — SaaS dashboards, admin panels, internal tools, documents, private sessions — where a headless browser or a fresh profile simply is not logged in.
 
-Most browser automation tools create a fresh browser profile. That is great for testing, but awkward for agents that need to work with your real web apps, authenticated dashboards, SaaS tools, admin panels, documents, or private sessions.
+Browser Relay is that missing layer:
 
-Browser Relay is built for that missing layer:
-
-- **Same browser as the user**: agents share your real Chrome session, including cookies, localStorage, extensions, and login state.
-- **No pop-up automation browser**: it does not spawn a separate Chrome window or create temporary tabs behind your back.
-- **Agent-first interface**: use the included Skill, MCP server, or plain HTTP API.
-- **Local-first security boundary**: the relay binds to `127.0.0.1` by default.
-- **Universal integration**: works with Claude, Claude Code, Cursor, Windsurf, custom agents, scripts, and tools that can call HTTP or MCP.
+- **Your actual Chrome session** — cookies, localStorage, extensions, and login state, shared as-is.
+- **No pop-up automation browser** — it never spawns a separate window or opens tabs behind your back; navigation reuses an attached tab.
+- **Local or remote** — drive the browser from this machine, or from anywhere through a public relay service (self-hostable on Cloudflare in one click), with no public port exposed.
+- **Agent-first** — a bundled Skill, an MCP server, and a simple HTTP API; works with Claude, Claude Code, Cursor, Windsurf, custom agents, and scripts.
+- **Local-first boundary** — the relay binds to `127.0.0.1` by default.
 
 ## Provenance
 
-This project is based on source code from [chengyixu/openclaw-browser-relay](https://github.com/chengyixu/openclaw-browser-relay), with architecture and auto-attach behavior inspired by [blakesabatinelli/openclaw-chrome-relay](https://github.com/blakesabatinelli/openclaw-chrome-relay).
-
-This distribution removes OpenClaw-specific gateway handshakes, token authentication, and platform bindings, and repackages the relay as a general-purpose local browser bridge for AI agents.
-
-## OpenClaw Alternative for Real Chrome Sessions
-
-If you are looking for an OpenClaw Browser Relay alternative, Browser Relay focuses on local-first AI agent browser automation with your real Chrome session. It gives agents access to the same authenticated tabs, cookies, extensions, and login state that you use every day without requiring a throwaway browser profile or a remote Chrome debugging port.
-
-This makes it useful for AI agent real Chrome session workflows: SaaS dashboards, admin panels, internal tools, documents, and other pages where headless browsers or fresh automation profiles fail because they are not logged in.
+Based on [chengyixu/openclaw-browser-relay](https://github.com/chengyixu/openclaw-browser-relay), with auto-attach behavior inspired by [blakesabatinelli/openclaw-chrome-relay](https://github.com/blakesabatinelli/openclaw-chrome-relay). Repackaged as a general-purpose local browser bridge for AI agents, without the OpenClaw-specific gateway, token auth, or platform bindings.
 
 ## Architecture
 
 ```text
-AI Agent
-  |
-  | HTTP API / MCP
-  v
-Browser Relay Server (Node.js, localhost)
-  |
-  | WebSocket
-  v
-Browser Relay Chrome Extension
-  |
-  | chrome.debugger / CDP
-  v
-Your existing Chrome tabs
+Local
+  AI Agent ──CLI / MCP / HTTP──▶ Relay server (Node, 127.0.0.1)
+                                        │ WebSocket
+                                        ▼
+                                 Chrome extension ──chrome.debugger / CDP──▶ your Chrome tabs
+
+Remote (Remote Relay)
+  AI Agent ──HTTPS──▶ public relay (relay.linso.ai) ◀──WSS── Chrome extension ──▶ your Chrome tabs
 ```
 
-The relay server listens on `127.0.0.1` by default. The Chrome extension attaches to regular Chrome tabs and forwards Chrome DevTools Protocol commands between the local relay and the browser.
+**Local mode** is the default: the agent talks to a relay server on `127.0.0.1`, which forwards Chrome DevTools Protocol commands to the extension.
+
+**Remote mode** exposes nothing. When you turn on Remote Relay, the extension connects *out* to a public relay service; a remote CLI reaches that same service, which routes each command down to your browser over the existing connection — no open ports, no local server on the network. Use the default hosted relay, or run your own on Cloudflare in one click (see below).
 
 ## Quick Start
 
@@ -101,21 +90,9 @@ Print the extension directory:
 browser-relay path
 ```
 
-Then open Chrome:
+Then open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `extension` directory printed by `browser-relay path`.
 
-```text
-chrome://extensions
-```
-
-Enable **Developer mode**, click **Load unpacked**, and select the `extension` directory printed by `browser-relay path`.
-
-Upgrade with:
-
-```bash
-browser-relay update
-```
-
-This installs `@linsoai/browser-relay@latest` globally, refreshes the background service, and prints a status check. The extension reloads itself the next time it reconnects to the relay (within ~30 seconds). Check with `browser-relay status`, which shows both the CLI and daemon versions.
+Upgrade with `browser-relay update`. It installs `@linsoai/browser-relay@latest` globally, refreshes the background service, and prints a status check; the extension reloads itself the next time it reconnects (within ~30 seconds).
 
 ### 3. Install the Agent Skill
 
@@ -125,26 +102,96 @@ Browser Relay ships with an agent-friendly Skill. Print the install command:
 browser-relay skill
 ```
 
-Then run the printed `npx skills ...` command and choose the agent you want to install it into.
-
-You can also run it directly:
-
-```bash
-$(browser-relay skill)
-```
-
-After that, your agent can operate your own browser without opening a separate automation browser.
+Then run the printed `npx skills ...` command and choose the agent to install it into, or run it directly with `$(browser-relay skill)`. After that, your agent can operate your own browser without opening a separate automation browser.
 
 ## Agent Friendly by Default
 
 Browser Relay is designed to be comfortable for agents, not just low-level automation scripts.
 
 - The included Skill tells agents when to use Browser Relay and how to interact safely.
-- The MCP server exposes high-level tools such as `browser_tabs`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_key`, and `browser_screenshot`.
-- The HTTP API is simple enough for any custom agent or script.
 - Page snapshots are annotated with links, buttons, inputs, and other interactive elements so agents can plan before acting.
 - Actions target existing attached tabs, keeping the user's browser context visible and predictable.
-- Console capture records `console.*`, page exceptions, and browser log entries for debugging real-page behavior.
+- Console and network capture record `console.*`, page exceptions, log entries, and request/response activity for debugging real-page behavior.
+
+## CLI
+
+The CLI is the primary interface. For agents that can run shell commands, it is faster and less error-prone than hand-writing `curl` JSON:
+
+```bash
+browser-relay tabs
+browser-relay console --tab ABC123 --limit 50
+browser-relay network --tab ABC123 --type response --status 500
+browser-relay snapshot --tab ABC123 --max-length 20000
+browser-relay click 'button[type=submit]' --tab ABC123
+browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
+browser-relay key Control+L
+browser-relay scroll down --amount 1000
+browser-relay screenshot /tmp/page.png --full-page
+browser-relay eval 'document.title'
+```
+
+For long text or JavaScript, avoid shell escaping by reading from stdin:
+
+```bash
+printf 'hello\nworld' | browser-relay type --selector textarea --stdin
+browser-relay eval --stdin < script.js
+```
+
+All browser commands accept `--json` for the raw API response and `--tab <id>` to target a specific tab. When `--json` is used, a failed command prints the structured error payload and exits non-zero.
+
+### Remote control (Remote Relay)
+
+To drive this browser from **another machine** — a CI box, a remote agent, a different network — turn on **Remote Relay** in the extension's Options page. The browser connects out to a public relay service (the hosted `relay.linso.ai` by default); nothing listens on a public port and no local server is exposed.
+
+Turning it on mints a secret **Device ID** — treat it like a password. Pass it to the same CLI commands from anywhere:
+
+```bash
+browser-relay tabs --remote-device-id br-xxxx
+browser-relay eval "location.href" --remote-device-id br-xxxx
+
+# Save an alias once so you don't retype the id (remote ls / rm to manage):
+browser-relay remote add mymac br-xxxx
+browser-relay tabs --remote mymac
+```
+
+**Run your own relay** instead of the hosted one — deploy it to Cloudflare in one click, then set the Options page's *Public relay* field to your Worker URL:
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub)
+
+The `remote-device-id` is a capability — anyone with it can control this browser while Remote Relay is on. Design notes: `docs/remote-control-hub.md`.
+
+### CLI reference
+
+```bash
+browser-relay            # Run the relay server in the foreground
+browser-relay start      # Start the background service
+browser-relay stop       # Stop the background service
+browser-relay restart    # Restart the background service
+browser-relay fix        # Restart and clear stale session state (when tabs won't connect)
+browser-relay update     # Update the global package and refresh the service
+browser-relay status     # Show service state and HTTP health
+browser-relay logs       # Tail /tmp/browser-relay.log
+browser-relay path       # Print the Chrome extension directory
+browser-relay skill      # Print the Skill install command
+browser-relay install    # Register the background service
+browser-relay uninstall  # Unregister the background service
+
+browser-relay tabs       # List attached browser tabs
+browser-relay console    # Print captured console/page errors
+browser-relay network    # Print captured network requests/responses/failures
+browser-relay snapshot   # Print annotated page text
+browser-relay click      # Click an element by CSS selector
+browser-relay type       # Type text into the page
+browser-relay key        # Press a key or shortcut
+browser-relay scroll     # Scroll the page
+browser-relay screenshot # Save a PNG screenshot
+browser-relay eval       # Evaluate JavaScript in the page
+browser-relay download   # Print src/href for an element
+browser-relay download-start # Start a Chrome download
+browser-relay downloads      # List Chrome downloads and events
+browser-relay remote     # Manage remote aliases (add / ls / rm)
+browser-relay api-help   # Show browser command examples
+```
 
 ## MCP
 
@@ -163,41 +210,11 @@ After installing the npm package, use `browser-relay-mcp` directly:
 }
 ```
 
-## Browser CLI
-
-For agents that can run shell commands, the CLI is usually faster and less error-prone than hand-writing `curl` JSON:
-
-```bash
-browser-relay tabs
-browser-relay console --tab ABC123 --limit 50
-browser-relay snapshot --tab ABC123 --max-length 20000
-browser-relay click 'button[type=submit]' --tab ABC123
-browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
-browser-relay key Control+L
-browser-relay scroll down --amount 1000
-browser-relay download-start https://example.com/file.pdf --filename files/file.pdf
-browser-relay downloads --limit 20
-browser-relay screenshot /tmp/page.png --full-page
-browser-relay eval 'document.title'
-```
-
-For long text or JavaScript, avoid shell escaping by reading from stdin:
-
-```bash
-printf 'hello\nworld' | browser-relay type --selector textarea --stdin
-browser-relay eval --stdin < script.js
-```
-
-All browser commands accept `--json` for the raw API response and `--tab <id>` to target a specific tab.
-
-Agent guidance: prefer the CLI for browser interaction. Use the HTTP API when
-you are writing code, tests, or an integration against Browser Relay, or when a
-CLI is not available in the environment.
+The MCP server exposes high-level tools such as `browser_tabs`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_key`, and `browser_screenshot`.
 
 ## HTTP API
 
-The HTTP API is the stable integration surface for code and custom tools. For
-interactive agent work, prefer the CLI above.
+The HTTP API is the stable integration surface for code and custom tools. For interactive agent work, prefer the CLI above.
 
 Errors use a structured shape across HTTP, CLI `--json`, and MCP tool errors:
 
@@ -246,58 +263,9 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/downloads` | GET | List Chrome downloads and recent download events |
 | `/api/downloads/clear` | POST | Clear captured download events |
 
-Real Chrome downloads require the extension's `downloads` permission. After
-upgrading from an older Browser Relay version, reload the unpacked extension in
-`chrome://extensions`.
+Real Chrome downloads require the extension's `downloads` permission. After upgrading from an older Browser Relay version, reload the unpacked extension in `chrome://extensions`.
 
-## CLI
-
-```bash
-browser-relay            # Run the relay server in the foreground
-browser-relay start      # Start the background service
-browser-relay stop       # Stop the background service
-browser-relay restart    # Restart the background service
-browser-relay fix        # Restart and clear stale session state (when tabs won't connect)
-browser-relay update     # Update the global package and refresh the service
-browser-relay status     # Show service state and HTTP health
-browser-relay logs       # Tail /tmp/browser-relay.log
-browser-relay path       # Print the Chrome extension directory
-browser-relay skill      # Print the Skill install command
-browser-relay install    # Register the background service
-browser-relay uninstall  # Unregister the background service
-
-browser-relay tabs       # List attached browser tabs
-browser-relay console    # Print captured console/page errors
-browser-relay network    # Print captured network requests/responses/failures
-browser-relay snapshot   # Print annotated page text
-browser-relay click      # Click an element by CSS selector
-browser-relay type       # Type text into the page
-browser-relay key        # Press a key or shortcut
-browser-relay scroll     # Scroll the page
-browser-relay screenshot # Save a PNG screenshot
-browser-relay eval       # Evaluate JavaScript in the page
-browser-relay download   # Print src/href for an element
-browser-relay download-start # Start a Chrome download
-browser-relay downloads      # List Chrome downloads and events
-browser-relay api-help   # Show browser command examples
-```
-
-When `--json` is used, failed CLI browser commands print the structured error
-payload and exit non-zero instead of collapsing the response to plain text.
-
-Service files:
-
-```text
-macOS: ~/Library/LaunchAgents/org.browser-relay.service.plist
-Linux: ~/.config/systemd/user/browser-relay.service
-```
-
-Logs:
-
-```text
-/tmp/browser-relay.log
-/tmp/browser-relay.error.log
-```
+The same endpoints are reachable remotely: a CLI running with `--remote-device-id` sends them through the public relay to the browser.
 
 ## Configuration
 
@@ -306,8 +274,19 @@ Logs:
 | `BROWSER_RELAY_URL` | `http://127.0.0.1:18795` | Relay base URL used by CLI browser commands and MCP |
 | `BROWSER_RELAY_HOST` | `127.0.0.1` | HTTP and WebSocket bind address |
 | `BROWSER_RELAY_PORT` | `18795` | HTTP and WebSocket port |
+| `BROWSER_RELAY_REMOTE_DEVICE_ID` | — | Remote Device ID (or alias) used when no `--remote-device-id` flag is passed |
+| `BROWSER_RELAY_REMOTE_HOST` | `https://relay.linso.ai` | Public relay URL for remote commands |
 
 The Chrome extension port can be changed from the extension Options page.
+
+Service files:
+
+```text
+macOS: ~/Library/LaunchAgents/org.browser-relay.service.plist
+Linux: ~/.config/systemd/user/browser-relay.service
+```
+
+Logs: `/tmp/browser-relay.log`, `/tmp/browser-relay.error.log`
 
 ## Development
 
@@ -315,22 +294,16 @@ The Chrome extension port can be changed from the extension Options page.
 npm install
 npm start
 npm run mcp
+npm test
 ```
 
 Load the local `extension/` directory from `chrome://extensions` in Developer mode.
-
-Useful checks:
-
-```bash
-npm run sync-version
-npm run pack:dry-run
-```
 
 ## Security
 
 - The extension uses Chrome's `debugger` permission. Install only versions you trust.
 - The relay binds to `127.0.0.1` by default. Do not expose it to the public internet.
-- If you change the bind address, add your own authentication and network isolation.
+- Remote Relay never opens a port: the browser connects out to the public relay, which only holds a hash of your Device ID secret in memory. Treat the Device ID like a password; anyone with it can control the browser while Remote Relay is on.
 - Browser Relay gives agents access to the same browser state you have, so treat enabled agents as trusted local software.
 
 ## License

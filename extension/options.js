@@ -1,47 +1,269 @@
 const DEFAULT_IDLE_DETACH_SECONDS = 600
 const IDLE_DETACH_DEFAULT_MIGRATION_KEY = 'idleDetachDefaultMigratedTo600'
+const DEFAULT_REMOTE_HOST = 'https://relay.linso.ai'
 
-document.getElementById('save').addEventListener('click', async () => {
-  const port = parseInt(document.getElementById('relayPort').value, 10) || 18795
-  const statusEl = document.getElementById('status')
+const t = (key) => window.I18N.t(key)
 
-  const idleRaw = document.getElementById('idleDetachSeconds').value
+const els = {
+  relayPort: document.getElementById('relayPort'),
+  idleDetachSeconds: document.getElementById('idleDetachSeconds'),
+  uiLang: document.getElementById('uiLang'),
+  save: document.getElementById('save'),
+  status: document.getElementById('status'),
+  remoteToggle: document.getElementById('remoteToggle'),
+  remoteState: document.getElementById('remoteState'),
+  remoteDetails: document.getElementById('remoteDetails'),
+  remoteHost: document.getElementById('remoteHost'),
+  regenerateDevice: document.getElementById('regenerateDevice'),
+  regenRow: document.getElementById('regenRow'),
+  regenConfirm: document.getElementById('regenConfirm'),
+  regenApply: document.getElementById('regenApply'),
+  regenCancel: document.getElementById('regenCancel'),
+  remoteDeviceId: document.getElementById('remoteDeviceId'),
+  copyRemoteDeviceId: document.getElementById('copyRemoteDeviceId'),
+  remoteCommand: document.getElementById('remoteCommand'),
+  copyRemoteCommand: document.getElementById('copyRemoteCommand'),
+  remoteStatus: document.getElementById('remoteStatus'),
+}
+
+function relayPortValue() {
+  return parseInt(els.relayPort.value, 10) || 18795
+}
+
+function normalizeRemoteHost(value) {
+  const trimmed = String(value || '').trim().replace(/\/+$/, '')
+  return trimmed || DEFAULT_REMOTE_HOST
+}
+
+function setStatus(el, kind, message) {
+  if (!message) {
+    el.className = 'status'
+    el.textContent = ''
+    return
+  }
+  el.className = `status ${kind}`
+  el.textContent = message
+}
+
+function setRemoteState(kind, label) {
+  els.remoteState.className = `lbl is-${kind}`
+  els.remoteState.textContent = label
+}
+
+// Compact capability: `br-<secret>`. The routeId is derived from the secret
+// (below) instead of stored in the id, so it never appears. secret = 96-bit.
+function randomBase64Url(bytes) {
+  const arr = new Uint8Array(bytes)
+  crypto.getRandomValues(arr)
+  let bin = ''
+  for (const b of arr) bin += String.fromCharCode(b)
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
+// SHA-256(secret) → base64url → first 16 chars. Must match remote-protocol.deriveRouteId.
+async function deriveRouteId(secret) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret))
+  let bin = ''
+  for (const b of new Uint8Array(buf)) bin += String.fromCharCode(b)
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '').slice(0, 16)
+}
+
+async function newRemoteCapability() {
+  const secret = randomBase64Url(12)
+  const routeId = await deriveRouteId(secret)
+  return { routeId, secret, remoteDeviceId: `br-${secret}` }
+}
+
+function commandFor(remoteDeviceId, remoteHost) {
+  return `browser-relay tabs --remote-device-id ${remoteDeviceId} --remote-host ${remoteHost}`
+}
+
+function renderRemote(config = {}) {
+  const host = normalizeRemoteHost(config.remoteHost)
+  const enabled = !!config.remoteControlEnabled && !!config.remoteDeviceId
+  els.remoteHost.value = host
+  els.remoteToggle.checked = !!config.remoteControlEnabled
+  els.remoteDetails.classList.toggle('hidden', !enabled)
+  showRegenConfirm(false)
+
+  if (enabled) {
+    setRemoteState('on', t('stateOn'))
+    els.remoteDeviceId.textContent = config.remoteDeviceId
+    els.remoteCommand.textContent = commandFor(config.remoteDeviceId, host)
+    return
+  }
+
+  setRemoteState('off', t('stateOff'))
+  els.remoteDeviceId.textContent = ''
+  els.remoteCommand.textContent = ''
+  setStatus(els.remoteStatus, '', '')
+}
+
+async function saveLocalSettings() {
+  const port = relayPortValue()
+  const idleRaw = els.idleDetachSeconds.value
   let idleDetachSeconds = parseInt(idleRaw, 10)
   if (!Number.isFinite(idleDetachSeconds) || idleDetachSeconds < 0) idleDetachSeconds = DEFAULT_IDLE_DETACH_SECONDS
 
   await chrome.storage.local.set({ relayPort: port, idleDetachSeconds, [IDLE_DETACH_DEFAULT_MIGRATION_KEY]: true })
+  return { port, idleDetachSeconds }
+}
 
-  // Test connection
+els.save.addEventListener('click', async () => {
+  const { port } = await saveLocalSettings()
+
   const url = `http://127.0.0.1:${port}/`
   try {
     const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(3000) })
     if (res.ok || res.status === 200) {
-      statusEl.className = 'status ok'
-      statusEl.textContent = 'Connected to relay server. Extension will auto-attach tabs.'
+      setStatus(els.status, 'ok', t('statusConnectedLocal'))
     } else {
-      statusEl.className = 'status err'
-      statusEl.textContent = `Relay server responded with status ${res.status}. Check if the server is running.`
+      setStatus(els.status, 'err', `${t('statusRelayStatus')} (${res.status})`)
     }
   } catch (err) {
-    statusEl.className = 'status err'
-    statusEl.textContent = `Cannot connect to relay at ${url}. Is the server running? (${err.message})`
+    setStatus(els.status, 'err', `${t('statusRelayUnreachable')} (${err.message})`)
   }
 })
 
-// Load saved settings
-chrome.storage.local.get(['relayPort', 'idleDetachSeconds', IDLE_DETACH_DEFAULT_MIGRATION_KEY], async (result) => {
-  if (result.relayPort) document.getElementById('relayPort').value = result.relayPort
+// Mint a fresh capability, persist it, and ask the background to connect to the hub.
+// Shared by the toggle (turning on) and the Regenerate button.
+async function enableRemote() {
+  await saveLocalSettings()
+  const remoteHost = normalizeRemoteHost(els.remoteHost.value)
+  const { routeId, secret, remoteDeviceId } = await newRemoteCapability()
+
+  await chrome.storage.local.set({
+    remoteControlEnabled: true,
+    remoteHost,
+    remoteRouteId: routeId,
+    remoteSecret: secret,
+    remoteDeviceId,
+  })
+  renderRemote({ remoteControlEnabled: true, remoteHost, remoteDeviceId })
+  setStatus(els.remoteStatus, 'info', t('statusConnectingHub'))
+
+  try {
+    const data = await chrome.runtime.sendMessage({ type: 'enableRemoteControl', remoteHost, routeId, secret, remoteDeviceId })
+    if (data?.connected) {
+      setRemoteState('on', t('stateOn'))
+      setStatus(els.remoteStatus, 'ok', t('statusRemoteConnected'))
+    } else {
+      setRemoteState('err', t('stateOn'))
+      setStatus(els.remoteStatus, 'err', t('statusRemoteNoHub') + (data?.lastError || 'unknown error'))
+    }
+  } catch (err) {
+    setRemoteState('err', t('stateOn'))
+    setStatus(els.remoteStatus, 'err', t('statusRemoteNoReach') + err.message)
+  }
+}
+
+async function disableRemote() {
+  try {
+    await chrome.runtime.sendMessage({ type: 'disableRemoteControl' })
+  } catch {
+    // Background may be waking up; still clear extension-side state.
+  }
+  const stored = await chrome.storage.local.get(['remoteHost'])
+  await chrome.storage.local.remove(['remoteRouteId', 'remoteSecret', 'remoteDeviceId'])
+  await chrome.storage.local.set({ remoteControlEnabled: false })
+  renderRemote({ remoteControlEnabled: false, remoteHost: stored.remoteHost || DEFAULT_REMOTE_HOST })
+  setStatus(els.remoteStatus, 'info', t('statusRemoteOff'))
+}
+
+els.remoteToggle.addEventListener('change', async () => {
+  els.remoteToggle.disabled = true
+  try {
+    if (els.remoteToggle.checked) await enableRemote()
+    else await disableRemote()
+  } finally {
+    els.remoteToggle.disabled = false
+  }
+})
+
+// Inline (not a browser confirm dialog) two-step confirmation for regenerate.
+function showRegenConfirm(show) {
+  els.regenRow.classList.toggle('hidden', show)
+  els.regenConfirm.classList.toggle('hidden', !show)
+}
+
+els.regenerateDevice.addEventListener('click', () => showRegenConfirm(true))
+els.regenCancel.addEventListener('click', () => showRegenConfirm(false))
+els.regenApply.addEventListener('click', async () => {
+  els.regenApply.disabled = true
+  try {
+    await enableRemote()
+    showRegenConfirm(false)
+  } finally {
+    els.regenApply.disabled = false
+  }
+})
+
+function flashButton(button, text) {
+  const label = text || t('copied')
+  const original = button.textContent
+  button.textContent = label
+  setTimeout(() => { button.textContent = original }, 1200)
+}
+
+function copyText(text, button) {
+  if (!text) return
+  navigator.clipboard.writeText(text).then(() => {
+    if (button) flashButton(button)
+  }).catch(() => {})
+}
+
+els.copyRemoteDeviceId.addEventListener('click', () => copyText(els.remoteDeviceId.textContent.trim(), els.copyRemoteDeviceId))
+els.remoteDeviceId.addEventListener('click', () => copyText(els.remoteDeviceId.textContent.trim(), els.copyRemoteDeviceId))
+els.remoteCommand.addEventListener('click', () => copyText(els.remoteCommand.textContent.trim(), els.copyRemoteCommand))
+els.copyRemoteCommand.addEventListener('click', () => copyText(els.remoteCommand.textContent.trim(), els.copyRemoteCommand))
+
+els.uiLang.addEventListener('change', async () => {
+  await chrome.storage.local.set({ uiLang: els.uiLang.value })
+  await initFromStorage()
+})
+
+async function initFromStorage() {
+  const result = await chrome.storage.local.get([
+    'relayPort',
+    'idleDetachSeconds',
+    IDLE_DETACH_DEFAULT_MIGRATION_KEY,
+    'remoteControlEnabled',
+    'remoteHost',
+    'remoteDeviceId',
+    'uiLang',
+  ])
+
+  window.I18N.setLang(result.uiLang || 'auto')
+  els.uiLang.value = result.uiLang || 'auto'
+  window.I18N.apply()
+
+  if (result.relayPort) els.relayPort.value = result.relayPort
 
   let idleDetachSeconds = result.idleDetachSeconds
   if (Number.parseInt(String(idleDetachSeconds), 10) === 30 && !result[IDLE_DETACH_DEFAULT_MIGRATION_KEY]) {
     idleDetachSeconds = DEFAULT_IDLE_DETACH_SECONDS
-    await chrome.storage.local.set({
-      idleDetachSeconds,
-      [IDLE_DETACH_DEFAULT_MIGRATION_KEY]: true,
-    })
+    await chrome.storage.local.set({ idleDetachSeconds, [IDLE_DETACH_DEFAULT_MIGRATION_KEY]: true })
+  }
+  if (result.idleDetachSeconds !== undefined && result.idleDetachSeconds !== null) {
+    els.idleDetachSeconds.value = idleDetachSeconds
   }
 
-  if (result.idleDetachSeconds !== undefined && result.idleDetachSeconds !== null) {
-    document.getElementById('idleDetachSeconds').value = idleDetachSeconds
+  renderRemote({
+    remoteControlEnabled: !!result.remoteControlEnabled,
+    remoteHost: result.remoteHost || DEFAULT_REMOTE_HOST,
+    remoteDeviceId: result.remoteDeviceId,
+  })
+
+  if (!result.remoteControlEnabled) return
+
+  try {
+    const data = await chrome.runtime.sendMessage({ type: 'getRemoteControlStatus' })
+    setRemoteState(data?.connected ? 'on' : 'err', t('stateOn'))
+    setStatus(els.remoteStatus, data?.connected ? 'ok' : 'err', data?.connected ? t('statusRemoteConnectedShort') : t('statusRemoteDisconnected') + (data?.lastError || 'not connected'))
+  } catch {
+    setRemoteState('err', t('stateOn'))
+    setStatus(els.remoteStatus, 'err', t('statusRemoteBgOffline'))
   }
-})
+}
+
+initFromStorage()

@@ -12,6 +12,7 @@
  *   BROWSER_RELAY_URL=http://127.0.0.1:18795 node mcp-server.js
  */
 import { readFileSync } from "node:fs";
+import { DEFAULT_REMOTE_HOST, parseRemoteDeviceId, remoteHttpBase } from "./remote-protocol.js";
 
 const RELAY_URL = (process.env.BROWSER_RELAY_URL || "http://127.0.0.1:18795").replace(/\/$/, "");
 const RELAY_PORT = parseInt(new URL(RELAY_URL).port || "18795", 10);
@@ -20,7 +21,58 @@ const PACKAGE_VERSION = JSON.parse(readFileSync(new URL("../package.json", impor
 // ---------------------------------------------------------------------------
 // HTTP client to relay
 // ---------------------------------------------------------------------------
+function remoteContextFromEnv() {
+  const remoteDeviceId = process.env.BROWSER_RELAY_REMOTE_DEVICE_ID;
+  if (!remoteDeviceId) return null;
+  try {
+    const parsed = parseRemoteDeviceId(remoteDeviceId);
+    const host = process.env.BROWSER_RELAY_REMOTE_HOST || DEFAULT_REMOTE_HOST;
+    return { ...parsed, host: remoteHttpBase(host) };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw relayToolError(errorPayload("invalid_remote_device_id", message, { status: 400 }));
+  }
+}
+
+async function remoteRelayRequest(ctx, method, path, body) {
+  const requestBody = {
+    routeId: ctx.routeId,
+    id: `mcp_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+    method,
+    path,
+    headers: {},
+    body: body === undefined ? null : body,
+  };
+
+  let res;
+  try {
+    res = await fetch(`${ctx.host}/v1/rpc`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${ctx.secret}` },
+      body: JSON.stringify(requestBody),
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    const message = `Cannot reach Browser Relay Hub at ${ctx.host}: ${detail}`;
+    throw relayToolError(errorPayload("remote_hub_unreachable", message, { status: 0, retryable: true }));
+  }
+
+  const text = await res.text();
+  let data = text;
+  try { data = text ? JSON.parse(text) : null; } catch { /* keep text */ }
+  if (!res.ok) {
+    const payload = data && typeof data === "object"
+      ? data
+      : errorPayload("remote_http_error", `HTTP ${res.status}`, { status: res.status });
+    throw relayToolError(payload);
+  }
+  if (data?.ok === false) throw relayToolError(data);
+  return data;
+}
+
 async function relayRequest(method, path, body) {
+  const remoteContext = remoteContextFromEnv();
+  if (remoteContext) return remoteRelayRequest(remoteContext, method, path, body);
   const url = `${RELAY_URL}${path}`;
   const headers = { "Content-Type": "application/json" };
   const opts = { method, headers };

@@ -13,56 +13,47 @@
   ·
   <a href="#快速开始">快速开始</a>
   ·
-  <a href="#agent-友好">Agent 友好</a>
+  <a href="#cli">CLI</a>
   ·
-  <a href="#http-api-示例">HTTP API</a>
+  <a href="#远程控制remote-relay">远程</a>
+  ·
+  <a href="#http-api">HTTP API</a>
 </p>
 
-Browser Relay 是一个本地 Chrome 控制桥，让 AI Agent 可以和你共用同一个 Chrome 浏览器。Agent 可以通过 HTTP API 或 MCP 读取页面、点击按钮、输入表单、滚动、截图、执行页面内 JavaScript，而且复用你当前浏览器里的登录状态、Cookie、localStorage 和扩展。
+Browser Relay 把你真实的、已登录的 Chrome 接到 AI Agent —— 通过简单的 CLI、MCP 或 HTTP。Agent 直接在你已经打开的标签页里工作,**在本地或从另一台机器上**,而不是用一个临时的自动化配置或无头浏览器。不启动云浏览器,不弹出额外的自动化窗口,不制造意外的新标签。
 
-它不会启动一个额外的自动化浏览器，不会弹出新的浏览器窗口，也不会默认创建临时 Tab。Browser Relay 面向的是你已经打开的真实 Chrome 标签页，普通导航会复用已附加的标签页。
+## 真实 Chrome,而非临时配置
 
-## 为什么需要它
+大多数浏览器自动化会开一个全新的空白浏览器配置。这适合测试,但对需要操作你**已登录**的 Web 应用的 Agent 毫无用处 —— SaaS 后台、管理面板、内网工具、文档、私有会话,这些页面在无头浏览器或全新配置里根本没有登录态。
 
-很多浏览器自动化工具会创建一个全新的浏览器配置，这适合测试，但不适合让 Agent 帮你操作真实工作流：已登录的后台、SaaS、CRM、文档、控制台、内网站点等。
+Browser Relay 补的就是这一层(也是很多人在找的 OpenClaw Browser Relay 替代方案):
 
-Browser Relay 解决的是这层连接：
-
-- **和用户共用同一个浏览器**：Agent 直接使用你的真实 Chrome 会话。
-- **不会弹出自动化浏览器和 Tab**：不创建额外浏览器窗口，不制造新的临时配置。
-- **Agent 友好**：自带 Skill，也提供 MCP server 和 HTTP API。
-- **本地优先**：默认只监听 `127.0.0.1`。
-- **通用接入**：Claude、Claude Code、Cursor、Windsurf、自定义 Agent 和脚本都可以使用。
+- **就是你自己的 Chrome 会话** —— Cookie、localStorage、扩展、登录状态,原样共用。
+- **不弹自动化浏览器** —— 不开额外窗口、不在背后建标签;普通导航复用已附加的标签页。
+- **本地或远程** —— 在本机控制,或通过公网 Relay 服务(可一键部署到 Cloudflare 自建)从任何地方控制,且不暴露任何公网端口。
+- **面向 Agent** —— 自带 Skill、MCP server、简单的 HTTP API;适配 Claude、Claude Code、Cursor、Windsurf、自定义 Agent 和脚本。
+- **本地优先边界** —— 默认只监听 `127.0.0.1`。
 
 ## 来源说明
 
-本项目源代码整理自 [chengyixu/openclaw-browser-relay](https://github.com/chengyixu/openclaw-browser-relay)，并参考了 [blakesabatinelli/openclaw-chrome-relay](https://github.com/blakesabatinelli/openclaw-chrome-relay) 的架构和自动附加标签页逻辑。
-
-当前版本移除了 OpenClaw 专属的网关握手、token 鉴权和平台绑定，整理为通用的本地 Browser Relay。
-
-## OpenClaw 替代方案与真实 Chrome 会话
-
-如果你在找 OpenClaw Browser Relay alternative，Browser Relay 的定位是本地优先的 AI agent browser automation：让 Agent 使用你的真实 Chrome 会话，而不是临时浏览器配置。Agent 可以复用你日常使用的已登录标签页、Cookie、扩展和登录状态，也不要求用户打开远程 Chrome debugging port。
-
-这适合 AI agent real Chrome session 场景：SaaS 后台、管理面板、内网工具、在线文档，以及那些因为没有登录态而让 headless browser 或全新自动化配置失效的页面。
+源代码整理自 [chengyixu/openclaw-browser-relay](https://github.com/chengyixu/openclaw-browser-relay),自动附加标签页的逻辑参考了 [blakesabatinelli/openclaw-chrome-relay](https://github.com/blakesabatinelli/openclaw-chrome-relay)。移除了 OpenClaw 专属的网关握手、token 鉴权和平台绑定,整理为通用的本地浏览器桥。
 
 ## 工作方式
 
 ```text
-AI Agent
-  |
-  | HTTP API / MCP
-  v
-Browser Relay Server (Node.js, localhost)
-  |
-  | WebSocket
-  v
-Browser Relay Chrome Extension
-  |
-  | chrome.debugger / CDP
-  v
-你已经打开的 Chrome 标签页
+本地
+  AI Agent ──CLI / MCP / HTTP──▶ Relay 服务器 (Node, 127.0.0.1)
+                                        │ WebSocket
+                                        ▼
+                                 Chrome 扩展 ──chrome.debugger / CDP──▶ 你的 Chrome 标签页
+
+远程（Remote Relay）
+  AI Agent ──HTTPS──▶ 公网 Relay 服务 (relay.linso.ai) ◀──WSS── Chrome 扩展 ──▶ 你的 Chrome 标签页
 ```
+
+**本地模式**是默认:Agent 连本机 `127.0.0.1` 上的 relay 服务器,由它把 Chrome DevTools Protocol 命令转发给扩展。
+
+**远程模式**不暴露任何东西。打开 Remote Relay 后,扩展会主动**出站**连到公网 Relay 服务;远程的 CLI 连到同一个服务,由它顺着这条已有连接把每条命令下发到你的浏览器 —— 没有开放端口,网络上也没有本地服务。命令由扩展用 `chrome.debugger` 自己执行,所以远程控制不依赖本地 relay。可以用默认的托管服务,也可以一键部署到 Cloudflare 自建(见下文)。
 
 ## 快速开始
 
@@ -75,160 +66,87 @@ npm install -g @linsoai/browser-relay
 browser-relay status
 ```
 
-macOS 和 Linux 上，全局安装会自动注册用户级后台服务，登录后自动启动。若服务未启动，可以执行：
-
-```bash
-browser-relay start
-```
+macOS 和 Linux 上,全局安装会自动注册用户级后台服务,登录后自动启动。若服务未启动,可以执行 `browser-relay start`。
 
 ### 2. 安装 Chrome 扩展
 
-先获取扩展目录：
+先获取扩展目录:
 
 ```bash
 browser-relay path
 ```
 
-然后打开：
+然后打开 `chrome://extensions`,打开右上角开发者模式,点击 `Load unpacked`,选择 `browser-relay path` 输出的 `extension` 目录。
 
-```text
-chrome://extensions
-```
-
-打开右上角开发者模式，点击 `Load unpacked`，选择 `browser-relay path` 输出的 `extension` 目录。
-
-升级命令：
-
-```bash
-browser-relay update
-```
-
-它会全局安装 `@linsoai/browser-relay@latest`、刷新后台服务，并输出状态检查。扩展会在下次重连 relay 时（约 30 秒内）自动重载。可以用 `browser-relay status` 确认，它会同时显示 CLI 和 daemon 的版本。
+升级用 `browser-relay update`:它会全局安装 `@linsoai/browser-relay@latest`、刷新后台服务并输出状态检查;扩展会在下次重连(约 30 秒内)自动重载。
 
 ### 3. 安装 Agent Skill
 
-Browser Relay 自带 Agent Skill：
+Browser Relay 自带 Agent Skill:
 
 ```bash
 browser-relay skill
 ```
 
-命令会输出一条 `npx skills ...` 安装命令，按提示安装到对应的 Agent 里。
-
-也可以直接执行：
-
-```bash
-$(browser-relay skill)
-```
-
-安装完成后，就可以让 Agent 操作你自己的浏览器了。
+命令会输出一条 `npx skills ...` 安装命令,按提示安装到对应 Agent;也可以直接执行 `$(browser-relay skill)`。安装后就能让 Agent 操作你自己的浏览器,而不用另开自动化浏览器。
 
 ## Agent 友好
 
-Browser Relay 不是只给底层自动化脚本使用的，它也专门面向 Agent 工作流做了设计：
+Browser Relay 专门为 Agent 工作流做了设计,不只是给底层脚本用:
 
-- 自带 Skill，告诉 Agent 什么时候使用 Browser Relay，以及如何安全交互。
-- MCP server 提供 `browser_tabs`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_key`、`browser_screenshot` 等高层工具。
-- HTTP API 足够简单，自定义 Agent 或脚本也可以直接调用。
-- 页面快照会标注链接、按钮、输入框等交互元素，方便 Agent 先理解页面再行动。
-- 操作会落在已附加的真实标签页上，让用户的浏览器上下文保持可见、可预期。
-- Console 捕获会记录 `console.*`、页面异常和浏览器 log，方便诊断真实页面行为。
+- 自带 Skill,告诉 Agent 何时用 Browser Relay 以及如何安全交互。
+- 页面快照会标注链接、按钮、输入框等交互元素,方便 Agent 先理解页面再行动。
+- 操作落在已附加的真实标签页上,让浏览器上下文保持可见、可预期。
+- Console 和 Network 捕获会记录 `console.*`、页面异常、日志以及请求/响应,便于诊断真实页面行为。
 
-## MCP 配置
+## CLI
 
-```json
-{
-  "mcpServers": {
-    "browser": {
-      "command": "browser-relay-mcp",
-      "env": {
-        "BROWSER_RELAY_URL": "http://127.0.0.1:18795"
-      }
-    }
-  }
-}
-```
-
-## 浏览器 CLI
-
-如果 Agent 能执行 shell 命令，优先用 CLI，通常比手写 `curl` JSON 更快，也少很多转义：
+CLI 是首选接口。能执行 shell 的 Agent 用它比手写 `curl` JSON 更快、更少转义:
 
 ```bash
 browser-relay tabs
 browser-relay console --tab ABC123 --limit 50
+browser-relay network --tab ABC123 --type response --status 500
 browser-relay snapshot --tab ABC123 --max-length 20000
 browser-relay click 'button[type=submit]' --tab ABC123
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
 browser-relay key Control+L
 browser-relay scroll down --amount 1000
-browser-relay download-start https://example.com/file.pdf --filename files/file.pdf
-browser-relay downloads --limit 20
 browser-relay screenshot /tmp/page.png --full-page
 browser-relay eval 'document.title'
 ```
 
-长文本或多行 JavaScript 可以从 stdin 读取，避免 shell 转义：
+长文本或多行 JavaScript 从 stdin 读取,避免 shell 转义:
 
 ```bash
 printf 'hello\nworld' | browser-relay type --selector textarea --stdin
 browser-relay eval --stdin < script.js
 ```
 
-所有浏览器操作命令都支持 `--json` 输出原始 API 响应，也支持 `--tab <id>` 指定标签页。
+所有浏览器命令都支持 `--json`(输出原始 API 响应)和 `--tab <id>`(指定标签页)。用 `--json` 时失败命令会输出结构化错误 JSON 并以非 0 退出。
 
-Agent 使用规则：浏览器交互默认使用 CLI。只有在编写代码、测试、集成
-Browser Relay，或者当前环境没有 CLI 时，才直接使用 HTTP API。
+### 远程控制（Remote Relay）
 
-## HTTP API 示例
+要从**另一台机器**(CI、远程 agent、不同网络)控制这个浏览器,在扩展 Options 页面打开 **Remote Relay**。浏览器会主动连到公网 Relay 服务(默认是托管的 `relay.linso.ai`)——不开放任何公网端口,也不暴露本地服务。
 
-HTTP API 是给代码和自定义工具集成用的稳定接口。交互式 Agent 操作优先使用上面的 CLI。
-
-HTTP、CLI `--json` 和 MCP 工具错误都使用结构化错误格式：
-
-```json
-{ "ok": false, "code": "invalid_request", "error": "url is required", "message": "url is required", "status": 400, "retryable": false }
-```
+打开后会生成一个保密的 **Device ID**——请像密码一样保管,在任何地方传给同样的 CLI 命令即可:
 
 ```bash
-curl http://127.0.0.1:18795/api/tabs
+browser-relay tabs --remote-device-id br-xxxx
+browser-relay eval "location.href" --remote-device-id br-xxxx
 
-curl "http://127.0.0.1:18795/api/console?tabId=ABC123&limit=50"
-
-curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123"
-
-curl -X POST http://127.0.0.1:18795/api/click \
-  -H "Content-Type: application/json" \
-  -d '{"tabId":"ABC123","selector":"button.submit"}'
+# 存个别名,以后不用重复贴长 id(remote ls / rm 管理):
+browser-relay remote add mymac br-xxxx
+browser-relay tabs --remote mymac
 ```
 
-常用接口：
+**自建你自己的 Relay 服务** —— 一键部署到 Cloudflare,然后把 Options 页面的 *公网 Relay 服务* 填成你的 Worker 地址:
 
-| Endpoint | Method | 说明 |
-| --- | --- | --- |
-| `/` | GET/HEAD | 健康检查 |
-| `/api/debug` | GET | 服务状态和诊断信息 |
-| `/api/tabs` | GET | 列出已附加标签页 |
-| `/api/console` | GET | 读取 console 和页面错误记录 |
-| `/api/console/clear` | POST | 清理 console 记录 |
-| `/api/network` | GET | 读取已捕获的 Network 请求、响应和失败事件（敏感 header 已脱敏） |
-| `/api/network/clear` | POST | 清理已捕获的网络事件 |
-| `/api/navigate` | POST | 导航已附加标签页 |
-| `/api/snapshot` | GET | 获取页面文本快照或 HTML |
-| `/api/click` | POST | 按 CSS selector 点击元素 |
-| `/api/type` | POST | 输入文本 |
-| `/api/key` | POST | 按键或键盘快捷键 |
-| `/api/scroll` | POST | 滚动页面 |
-| `/api/screenshot` | GET/POST | 获取 PNG 截图；full-page 会返回截图策略和尺寸元数据 |
-| `/api/eval` | POST | 执行页面内 JavaScript |
-| `/api/download` | POST | 获取元素 URL |
-| `/api/download/start` | POST | 从 URL 启动真实 Chrome 下载 |
-| `/api/downloads` | GET | 列出 Chrome 下载和最近下载事件 |
-| `/api/downloads/clear` | POST | 清理已捕获的下载事件 |
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub)
 
-真实 Chrome 下载需要扩展的 `downloads` 权限。如果是从旧版本升级，需在
-`chrome://extensions` 里重新加载 unpacked 扩展。
+`remote-device-id` 是一个 capability —— Remote Relay 开着时,拿到它的人就能控制这个浏览器。设计见 `docs/remote-control-hub.md`。
 
-## CLI
+### CLI 参考
 
 ```bash
 browser-relay            # 前台运行 relay server
@@ -257,19 +175,85 @@ browser-relay eval       # 在页面内执行 JavaScript
 browser-relay download   # 输出元素 src/href
 browser-relay download-start # 启动 Chrome 下载
 browser-relay downloads      # 列出 Chrome 下载和事件
+browser-relay remote     # 管理远程别名（add / ls / rm）
 browser-relay api-help   # 查看浏览器操作命令示例
 ```
 
-使用 `--json` 时，失败的 CLI 浏览器命令会输出结构化错误 JSON 并以非 0 状态退出，
-不会只打印纯文本错误。
+## MCP
+
+安装 npm 包后直接用 `browser-relay-mcp`:
+
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "command": "browser-relay-mcp",
+      "env": {
+        "BROWSER_RELAY_URL": "http://127.0.0.1:18795"
+      }
+    }
+  }
+}
+```
+
+MCP server 提供 `browser_tabs`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_key`、`browser_screenshot` 等高层工具。
+
+## HTTP API
+
+HTTP API 是给代码和自定义工具集成用的稳定接口。交互式 Agent 操作优先用上面的 CLI。
+
+HTTP、CLI `--json` 和 MCP 工具错误都使用结构化错误格式:
+
+```json
+{ "ok": false, "code": "invalid_request", "error": "url is required", "message": "url is required", "status": 400, "retryable": false }
+```
+
+```bash
+curl http://127.0.0.1:18795/api/tabs
+curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123"
+curl "http://127.0.0.1:18795/api/console?tabId=ABC123&limit=50"
+curl "http://127.0.0.1:18795/api/network?tabId=ABC123&type=response&status=500"
+
+curl -X POST http://127.0.0.1:18795/api/click \
+  -H "Content-Type: application/json" \
+  -d '{"tabId":"ABC123","selector":"button.submit"}'
+```
+
+| Endpoint | Method | 说明 |
+| --- | --- | --- |
+| `/` | GET/HEAD | 健康检查 |
+| `/api/debug` | GET | 服务状态和诊断信息 |
+| `/api/tabs` | GET | 列出已附加标签页 |
+| `/api/console` | GET | 读取 console 和页面错误记录 |
+| `/api/console/clear` | POST | 清理 console 记录 |
+| `/api/network` | GET | 读取已捕获的 Network 请求、响应和失败事件（敏感 header 已脱敏） |
+| `/api/network/clear` | POST | 清理已捕获的网络事件 |
+| `/api/navigate` | POST | 导航已附加标签页 |
+| `/api/snapshot` | GET | 获取页面文本快照或 HTML |
+| `/api/click` | POST | 按 CSS selector 点击元素 |
+| `/api/type` | POST | 输入文本 |
+| `/api/key` | POST | 按键或键盘快捷键 |
+| `/api/scroll` | POST | 滚动页面 |
+| `/api/screenshot` | GET/POST | 获取 PNG 截图；full-page 会返回截图策略和尺寸元数据 |
+| `/api/eval` | POST | 执行页面内 JavaScript |
+| `/api/download` | POST | 获取元素 URL |
+| `/api/download/start` | POST | 从 URL 启动真实 Chrome 下载 |
+| `/api/downloads` | GET | 列出 Chrome 下载和最近下载事件 |
+| `/api/downloads/clear` | POST | 清理已捕获的下载事件 |
+
+真实 Chrome 下载需要扩展的 `downloads` 权限。从旧版本升级后,需在 `chrome://extensions` 里重新加载 unpacked 扩展。
+
+这些接口远程同样可用:带 `--remote-device-id` 的 CLI 会把它们经公网 Relay 服务发到浏览器。
 
 ## 配置
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `BROWSER_RELAY_URL` | `http://127.0.0.1:18795` | CLI 浏览器操作命令和 MCP 使用的 relay 地址 |
+| `BROWSER_RELAY_URL` | `http://127.0.0.1:18795` | CLI 浏览器命令和 MCP 使用的 relay 地址 |
 | `BROWSER_RELAY_HOST` | `127.0.0.1` | HTTP 和 WebSocket 监听地址 |
 | `BROWSER_RELAY_PORT` | `18795` | HTTP 和 WebSocket 端口 |
+| `BROWSER_RELAY_REMOTE_DEVICE_ID` | — | 未传 `--remote-device-id` 时使用的远程 Device ID(或别名) |
+| `BROWSER_RELAY_REMOTE_HOST` | `https://relay.linso.ai` | 远程命令使用的公网 Relay 服务地址 |
 
 Chrome 扩展端口可以在扩展 Options 页面修改。
 
@@ -279,17 +263,17 @@ Chrome 扩展端口可以在扩展 Options 页面修改。
 npm install
 npm start
 npm run mcp
-npm run pack:dry-run
+npm test
 ```
 
-开发时在 Chrome 的 `chrome://extensions` 中选择仓库里的 `extension/` 目录作为 unpacked extension。
+开发时在 `chrome://extensions` 中选择仓库里的 `extension/` 目录作为 unpacked extension。
 
 ## 安全说明
 
-- Chrome 扩展使用 `debugger` 权限，只安装你信任的版本。
-- 默认只监听 `127.0.0.1`，不要把 relay server 暴露到公网。
-- 如果修改为非本机监听地址，请自行增加鉴权和网络隔离。
-- Browser Relay 会让 Agent 访问你的真实浏览器状态，因此启用的 Agent 应被视为可信本地软件。
+- Chrome 扩展使用 `debugger` 权限,只安装你信任的版本。
+- 默认只监听 `127.0.0.1`,不要把 relay server 暴露到公网。
+- Remote Relay 从不开放端口:浏览器主动出站连公网 Relay 服务,它只在内存里保存 Device ID 的哈希。Device ID 请像密码一样保管;Remote Relay 开着时,拿到它的人就能控制浏览器。
+- Browser Relay 会让 Agent 访问你的真实浏览器状态,因此启用的 Agent 应被视为可信本地软件。
 
 ## License
 

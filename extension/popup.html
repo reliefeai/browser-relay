@@ -35,28 +35,29 @@
   <div class="row">
     <div class="dot" id="dot"></div>
     <div style="flex:1">
-      <div class="label" id="label">Loading…</div>
+      <div class="label" id="label" data-i18n="popupLoading">Loading…</div>
       <div class="meta" id="meta"></div>
     </div>
   </div>
 
   <div class="actions">
-    <button id="reconnect" class="primary">Reconnect</button>
-    <button id="options">Options</button>
+    <button id="reconnect" class="primary" data-i18n="popupReconnect">Reconnect</button>
+    <button id="options" data-i18n="popupOptions">Options</button>
   </div>
 
   <div class="install" id="install">
-    <div class="install-title">Relay server not running — install and check it:</div>
+    <div class="install-title" data-i18n="popupInstallTitle">Relay server not running — install and check it:</div>
     <code id="cmd1">npm install -g @linsoai/browser-relay</code>
     <code id="cmd2">browser-relay status</code>
-    <div class="hint">Already installed? Check with <code style="display:inline; padding:1px 5px; cursor:text; font-size:11px">browser-relay status</code></div>
+    <div class="hint" data-i18n-html="popupInstallHint">Already installed? Check with <code style="display:inline; padding:1px 5px; cursor:text; font-size:11px">browser-relay status</code></div>
   </div>
 
   <footer>
     <span id="version">—</span>
-    <a id="docs">Docs</a>
+    <a id="docs" data-i18n="popupDocs">Docs</a>
   </footer>
 
+  <script src="i18n.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

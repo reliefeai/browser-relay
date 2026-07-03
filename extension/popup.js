@@ -1,3 +1,5 @@
+const t = (key) => window.I18N.t(key)
+
 const els = {
   dot: document.getElementById('dot'),
   label: document.getElementById('label'),
@@ -17,22 +19,22 @@ function render(state) {
 
   if (connected) {
     els.dot.className = 'dot on'
-    els.label.textContent = 'Connected'
-    els.meta.textContent = `${host} · ${attachedCount} tab${attachedCount === 1 ? '' : 's'} attached`
+    els.label.textContent = t('popupConnected')
+    els.meta.textContent = `${host} · ${attachedCount} ${t('popupTabsAttached')}`
     els.install.classList.remove('show')
-    els.reconnect.textContent = 'Re-attach tabs'
+    els.reconnect.textContent = t('popupReattach')
   } else if (connecting) {
     els.dot.className = 'dot connecting'
-    els.label.textContent = 'Connecting…'
-    els.meta.textContent = `Trying ${host}`
+    els.label.textContent = t('popupConnecting')
+    els.meta.textContent = t('popupTrying') + host
     els.install.classList.remove('show')
-    els.reconnect.textContent = 'Retry'
+    els.reconnect.textContent = t('popupRetry')
   } else {
     els.dot.className = 'dot err'
-    els.label.textContent = 'Not connected'
-    els.meta.textContent = lastError || `No relay server on ${host}`
+    els.label.textContent = t('popupNotConnected')
+    els.meta.textContent = lastError || (t('popupNoRelay') + host)
     els.install.classList.add('show')
-    els.reconnect.textContent = 'Retry'
+    els.reconnect.textContent = t('popupRetry')
   }
 
   els.version.textContent = version ? `v${version}` : ''
@@ -49,7 +51,7 @@ async function fetchStatus() {
 
 els.reconnect.addEventListener('click', async () => {
   els.dot.className = 'dot connecting'
-  els.label.textContent = 'Connecting…'
+  els.label.textContent = t('popupConnecting')
   els.meta.textContent = ''
   try { await chrome.runtime.sendMessage({ type: 'reconnect' }) } catch {}
   setTimeout(fetchStatus, 500)
@@ -75,6 +77,11 @@ function copyCmd(el) {
 els.cmd1.addEventListener('click', () => copyCmd(els.cmd1))
 els.cmd2.addEventListener('click', () => copyCmd(els.cmd2))
 
-fetchStatus()
+;(async () => {
+  const { uiLang } = await chrome.storage.local.get(['uiLang'])
+  window.I18N.setLang(uiLang || 'auto')
+  window.I18N.apply()
+  fetchStatus()
+})()
 const pollTimer = setInterval(fetchStatus, 1500)
 window.addEventListener('unload', () => clearInterval(pollTimer))
