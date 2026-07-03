@@ -176,22 +176,26 @@ browser-relay eval --stdin < script.js
 
 所有浏览器操作命令都支持 `--json` 输出原始 API 响应，也支持 `--tab <id>` 指定标签页。
 
-### 实验性远程控制 Hub
+### 远程控制（Remote Relay）
 
-默认仍然是本地控制。如果要在不暴露 `0.0.0.0:18795` 的情况下试远程控制，可以先启动本地 Hub，并在扩展 Options 页面打开 External Control：
+默认是本地控制。要从**另一台机器**（CI、远程 agent、不同网络）控制这个浏览器，在扩展 Options 页面打开 **Remote Relay**。浏览器会主动连到托管的 Cloudflare 中转站（`relay.linso.ai`）——不开放任何公网端口，也不暴露本地服务。
+
+1. 打开扩展 Options，把 **Remote Relay** 开关打开。它会生成一个保密的 **Device ID**，形如 `br-rFRgVldvb6HTVr7c`——请像密码一样保管。
+2. 在任何地方把它传给 CLI（默认就走托管中转站）：
 
 ```bash
-# 终端 1
-BROWSER_RELAY_HUB_PORT=18796 browser-relay hub
-
-# 终端 2：扩展生成 remote-device-id 后
-browser-relay debug \
-  --remote-device-id brd1_xxx \
-  --remote-host http://127.0.0.1:18796 \
-  --json
+browser-relay tabs --remote-device-id br-rFRgVldvb6HTVr7c
+browser-relay eval "location.href" --remote-device-id br-rFRgVldvb6HTVr7c
 ```
 
-`remote-device-id` 是浏览器扩展生成的 capability secret，需要像密码一样保管。本地 relay 仍然只监听 `127.0.0.1`，并通过出站 WebSocket 连接 Hub。架构和施工草案见 `docs/remote-control-hub.md`。
+3. 嫌 id 太长？存个别名,以后用短名字：
+
+```bash
+browser-relay remote add mymac br-rFRgVldvb6HTVr7c   # remote ls / rm 管理
+browser-relay tabs --remote mymac
+```
+
+**自部署：** 中转站就是 `hub/` 里一个小的 Cloudflare Worker + Durable Object。可以部署你自己的,把 Options 页面的 *Remote Hub* 填成你的 Worker 地址（`npm run hub:deploy`,或 Options 里的一键 Deploy to Cloudflare 按钮）。中转站只在内存里保存 secret 的哈希,不落盘。`remote-device-id` 是一个 capability：Remote Relay 开着时,拿到它的人就能控制这个浏览器。设计见 `docs/remote-control-hub.md`。
 
 Agent 使用规则：浏览器交互默认使用 CLI。只有在编写代码、测试、集成
 Browser Relay，或者当前环境没有 CLI 时，才直接使用 HTTP API。

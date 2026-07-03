@@ -189,27 +189,37 @@ browser-relay eval --stdin < script.js
 ```
 All browser commands accept `--json` for the raw API response and `--tab <id>` to target a specific tab.
 
-### Experimental remote control hub
+### Remote control (Remote Relay)
 
-Local control remains the default. For remote-control testing without exposing
-`0.0.0.0:18795`, run a local hub and enable External Control from the extension
-options page:
+Local control is the default. To drive this browser from **another machine** — a
+CI box, a remote agent, a different network — turn on **Remote Relay** in the
+extension's Options page. The browser connects out to a hosted Cloudflare hub
+(`relay.linso.ai`); nothing listens on a public port and no local server is
+exposed.
+
+1. Open the extension Options and flip **Remote Relay** on. It mints a secret
+   **Device ID** like `br-rFRgVldvb6HTVr7c` — treat it like a password.
+2. From anywhere, pass it to the CLI (the hosted hub is the default host):
 
 ```bash
-# terminal 1
-BROWSER_RELAY_HUB_PORT=18796 browser-relay hub
-
-# terminal 2, after the extension generated a remote-device-id
-browser-relay debug \
-  --remote-device-id brd1_xxx \
-  --remote-host http://127.0.0.1:18796 \
-  --json
+browser-relay tabs --remote-device-id br-rFRgVldvb6HTVr7c
+browser-relay eval "location.href" --remote-device-id br-rFRgVldvb6HTVr7c
 ```
 
-`remote-device-id` is a capability secret generated in the browser extension;
-keep it private. The local relay still listens on `127.0.0.1` and connects to
-the hub over outbound WebSocket. See `docs/remote-control-hub.md` for the draft
-architecture and implementation plan.
+3. Tired of the long id? Save an alias once and use a short name:
+
+```bash
+browser-relay remote add mymac br-rFRgVldvb6HTVr7c   # remote ls / rm to manage
+browser-relay tabs --remote mymac
+```
+
+**Self-hosting:** the hub is a small Cloudflare Worker + Durable Object in
+`hub/`. Deploy your own and point the Options page's *Remote Hub* field at your
+Worker URL (`npm run hub:deploy`, or the one-click Deploy to Cloudflare button in
+Options). The hub only ever holds a hash of the secret, in memory — nothing is
+persisted. The `remote-device-id` is a capability: anyone holding it can control
+this browser while Remote Relay is on. See `docs/remote-control-hub.md` for the
+design.
 
 Agent guidance: prefer the CLI for browser interaction. Use the HTTP API when
 you are writing code, tests, or an integration against Browser Relay, or when a
