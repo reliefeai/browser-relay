@@ -2,25 +2,22 @@
 
 The public relay is a small Cloudflare Worker + Durable Object. Run your own so remote control never touches a third-party service.
 
-## Deploy your own (recommended)
+## Deploy your own
+
+One click — deploys this Worker to your own Cloudflare account:
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub)
+
+The button clones this repo into your account and deploys via Workers Builds, so the first time it asks you to connect Cloudflare to GitHub. If you hit `no associated Git installation`, reconnect Git in the Cloudflare dashboard (**Workers & Pages → connect Git**) and make sure this repo is in the allowed list, then click again.
+
+Prefer the command line?
 
 ```bash
 git clone https://github.com/reliefeai/browser-relay
-cd browser-relay/hub
-npx wrangler deploy
+cd browser-relay/hub && npx wrangler deploy
 ```
 
-`wrangler deploy` logs you into Cloudflare and publishes the Worker to:
-
-```text
-https://browser-relay-hub.<your-subdomain>.workers.dev
-```
-
-Put that URL in the extension's **Public relay** field (Options → Remote Relay). No custom domain required. To use your own domain instead, add a `routes` entry to `wrangler.toml` (see the comment there).
-
-The one-click **Deploy to Cloudflare** button also works, but it uses Cloudflare's Git integration (Workers Builds) and needs the Cloudflare GitHub app connected to your account first — if you see `no associated Git installation`, connect Cloudflare to GitHub, or just use `wrangler deploy` above:
-
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub)
+Either way you get a URL like `https://browser-relay-hub.<your-subdomain>.workers.dev`. Put it in the extension's **Public relay** field (Options → Remote Relay). No custom domain required; to use your own, add a `routes` entry to `wrangler.toml`.
 
 ## Smoke check
 

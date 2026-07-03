@@ -1,0 +1,12 @@
+{
+  "name": "browser-relay-hub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser Relay public relay — Cloudflare Worker + Durable Object",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}
