@@ -12,16 +12,17 @@ test('keepalive reconnect path recovers relay tab session after direct reconnect
   );
 });
 
-test('options external-control UI is off by default and exposes generate/regenerate/copy affordances', () => {
+test('options remote-relay UI is off by default and exposes toggle/regenerate/copy affordances', () => {
   const html = readFileSync(new URL('../extension/options.html', import.meta.url), 'utf-8');
   const js = readFileSync(new URL('../extension/options.js', import.meta.url), 'utf-8');
 
-  assert.match(html, /id="remoteState" class="state-pill is-off">Off/);
-  assert.match(html, /id="remoteDetails" class="remote-details hidden"/);
+  assert.match(html, /class="lbl is-off" id="remoteState">Off/);
+  assert.match(html, /id="remoteToggle"/);
+  assert.match(html, /id="remoteDetails" class="hidden"/);
   assert.match(html, /id="copyRemoteDeviceId"/);
-  assert.match(js, /newRemoteCapability\s*\(\)/);
-  assert.match(js, /Enable & Generate Device ID/);
-  assert.match(js, /Regenerate Device ID/);
+  assert.match(html, /id="copyRemoteCommand"/);
+  assert.match(html, /id="regenerateDevice"/);
+  assert.match(js, /newRemoteCapability\s*\(/);
   assert.match(js, /chrome\.storage\.local\.remove\(\['remoteRouteId', 'remoteSecret', 'remoteDeviceId'\]\)/);
   assert.doesNotMatch(js, /Reconnect External Control/);
 });
@@ -34,7 +35,7 @@ test('extension external-control talks directly to hub, not local relay remote e
   assert.match(options, /chrome\.runtime\.sendMessage\(\{ type: 'enableRemoteControl'/);
   assert.match(options, /chrome\.runtime\.sendMessage\(\{ type: 'disableRemoteControl'/);
   assert.match(background, /async function ensureRemoteHubConnection\s*\(/);
-  assert.match(background, /async function onRemoteHubMessage\s*\(/);
+  assert.match(background, /async function handleHubMessage\s*\(/);
   assert.match(background, /msg\?\.type === 'enableRemoteControl'/);
   assert.match(background, /msg\?\.type === 'disableRemoteControl'/);
 });

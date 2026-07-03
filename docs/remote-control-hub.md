@@ -1,5 +1,7 @@
 # Browser Relay Remote Control Hub 架构与施工草案
 
+> **已落地实现(2026-07)**:本文是最初的「方案 B」草案(本地 relay daemon 出站连 Hub)。**实际实现改为「方案 A」**——浏览器插件**直接**连 Hub,并在插件内用 `chrome.debugger` 自己执行命令,本地 relay daemon 不参与远程。Hub = Cloudflare Worker + Durable Object,`secretHash` **仅存内存、不落盘**(设备断开即随 DO 回收)。Capability 为紧凑的 `br-<secret>`(见下方「Capability 格式」)。下文的 daemon 出站流程仅作存档参考。
+
 ## 目标
 
 把远程控制从“本地机器暴露 `0.0.0.0:18795` + HTTP token”改成“浏览器端授权 + 本地 daemon 出站连接 + Cloudflare Hub 转发”。
@@ -146,22 +148,19 @@ browser-relay-mcp
 
 `remote-device-id` 不是普通公开 ID，而是 capability。知道它的人就有控制权限，所以 UI 和文档都必须标注“像密码一样保管”。
 
-建议格式：
+最终格式（已实现）：
 
 ```text
-brd1_<routeId>_<secret>
+br-<secret>
 ```
 
-- `brd1`：版本前缀，方便未来升级协议。
-- `routeId`：随机路由 ID，用于 Worker 定位 Durable Object。
-- `secret`：随机授权密钥，用于 device/CLI 鉴权；未来也可派生 E2EE key。
+- `br`：版本前缀。
+- `secret`：随机授权密钥（96-bit，base64url，16 字符），用于 device/CLI 鉴权。
+- `routeId`（Worker 用来定位 Durable Object）**不放进 id**，而是从 secret 派生：`routeId = base64url(SHA-256(secret))` 取前 16 字符。CLI（Node crypto）与插件（SubtleCrypto）用同一算法派生，落到同一个 DO。
 
-建议长度：
+于是整个 capability 只有约 19 字符，例如 `br-G1PMrqZmTckQP63P`。
 
-- `routeId`：128-bit random，base64url。
-- `secret`：256-bit random，base64url。
-
-Hub 只存 `secret` 的 hash，不存明文 secret。
+Hub 只在**内存**里保存 `SHA-256(secret)`（设备在线期间），不存明文、不落盘 —— 设备断开、DO 回收即清空，不留僵尸路由。
 
 ---
 

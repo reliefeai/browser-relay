@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import { WebSocket } from 'ws';
+import { deriveRouteId } from '../server/remote-protocol.js';
 
 async function getFreePort() {
   const server = net.createServer();
@@ -28,25 +30,36 @@ async function waitFor(fn, { timeoutMs = 5000, intervalMs = 25, message = 'condi
   throw new Error(message);
 }
 
-async function startProcess(t, args, env, healthUrl, label) {
-  const child = spawn(process.execPath, args, {
+async function startHub(t, hubPort) {
+  const child = spawn(process.execPath, ['server/hub-server.js'], {
     cwd: new URL('..', import.meta.url),
-    env: { ...process.env, ...env },
+    env: { ...process.env, BROWSER_RELAY_HUB_HOST: '127.0.0.1', BROWSER_RELAY_HUB_PORT: String(hubPort) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
-  child.stdout.on('data', (chunk) => { output += chunk.toString(); });
-  child.stderr.on('data', (chunk) => { output += chunk.toString(); });
-  t.after(() => {
-    if (!child.killed) child.kill('SIGTERM');
+  child.stdout.on('data', (c) => { output += c.toString(); });
+  child.stderr.on('data', (c) => { output += c.toString(); });
+  t.after(() => { if (!child.killed) child.kill('SIGTERM'); });
+  await waitFor(async () => (await fetch(`http://127.0.0.1:${hubPort}/v1/health`, { signal: AbortSignal.timeout(500) })).ok,
+    { timeoutMs: 6000, message: `hub did not start\n${output}` });
+}
+
+// Simulate the browser extension: connect out to the hub as the device and
+// answer every rpc.request with a canned response.
+function connectDevice(t, hubPort, routeId, secret, responseBody) {
+  const ws = new WebSocket(`ws://127.0.0.1:${hubPort}/v1/device/connect?routeId=${encodeURIComponent(routeId)}&token=${encodeURIComponent(secret)}`);
+  t.after(() => { try { ws.close(); } catch {} });
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(String(raw));
+    if (msg.type === 'rpc.request') {
+      ws.send(JSON.stringify({ type: 'rpc.response', id: msg.id, status: 200, headers: { 'content-type': 'application/json' }, body: responseBody }));
+    }
   });
-
-  await waitFor(async () => {
-    const res = await fetch(healthUrl, { signal: AbortSignal.timeout(500) });
-    return res.ok;
-  }, { timeoutMs: 6000, message: `${label} did not start\n${output}` });
-
-  return { child, output: () => output };
+  return new Promise((resolve, reject) => {
+    ws.on('open', () => { ws.send(JSON.stringify({ type: 'device.hello', routeId, capabilities: ['debug'] })); resolve(ws); });
+    ws.on('unexpected-response', (_q, r) => reject(new Error('device upgrade rejected: HTTP ' + r.statusCode)));
+    ws.on('error', reject);
+  });
 }
 
 async function runCli(t, args, env = {}) {
@@ -55,80 +68,41 @@ async function runCli(t, args, env = {}) {
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-  child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-  t.after(() => {
-    if (!child.killed) child.kill('SIGTERM');
-  });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', (c) => { stdout += c.toString(); });
+  child.stderr.on('data', (c) => { stderr += c.toString(); });
+  t.after(() => { if (!child.killed) child.kill('SIGTERM'); });
   return new Promise((resolve) => child.on('close', (code) => resolve({ code, stdout, stderr })));
 }
 
-async function postJson(url, body) {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return { status: res.status, body: await res.json() };
-}
+const SECRET = 'G1PMrqZmTckQP63P';                 // 16 base64url chars = 96-bit
+const DEVICE_ID = `br-${SECRET}`;
+const ROUTE_ID = deriveRouteId(SECRET);
 
-test('remote hub routes CLI requests through the outbound local relay connection', async (t) => {
+test('hub routes a CLI request to the connected extension and returns its response', async (t) => {
   const hubPort = await getFreePort();
-  const relayPort = await getFreePort();
-  await startProcess(t, ['server/hub-server.js'], {
-    BROWSER_RELAY_HUB_HOST: '127.0.0.1',
-    BROWSER_RELAY_HUB_PORT: String(hubPort),
-  }, `http://127.0.0.1:${hubPort}/v1/health`, 'hub');
-  await startProcess(t, ['server/relay-server.js'], {
-    BROWSER_RELAY_HOST: '127.0.0.1',
-    BROWSER_RELAY_PORT: String(relayPort),
-  }, `http://127.0.0.1:${relayPort}/`, 'relay');
+  await startHub(t, hubPort);
+  await connectDevice(t, hubPort, ROUTE_ID, SECRET, { ok: true, service: 'test-device' });
 
-  const routeId = 'routeIdForRemoteTest';
-  const secret = 'abcdefghijklmnopqrstuvwxyzABCDEF0123456789';
-  const remoteDeviceId = `brd1_${routeId}_${secret}`;
   const hub = `http://127.0.0.1:${hubPort}`;
-
-  const enabled = await postJson(`http://127.0.0.1:${relayPort}/api/remote/enable`, {
-    hub,
-    routeId,
-    secret,
-    deviceName: 'test-device',
-  });
-  assert.equal(enabled.status, 200);
-  assert.equal(enabled.body.ok, true);
-  assert.equal(enabled.body.connected, true);
-  assert.equal(enabled.body.remoteDeviceId, remoteDeviceId);
-
   await waitFor(async () => {
-    const res = await fetch(`${hub}/v1/status/${routeId}`, { headers: { Authorization: `Bearer ${secret}` } });
-    const data = await res.json();
-    return data.connected;
+    const res = await fetch(`${hub}/v1/status/${ROUTE_ID}`, { headers: { Authorization: `Bearer ${SECRET}` } });
+    return (await res.json()).connected;
   }, { message: 'hub did not report connected device' });
 
-  const result = await runCli(t, ['debug', '--json', '--remote-device-id', remoteDeviceId, '--remote-host', hub]);
+  const result = await runCli(t, ['debug', '--json', '--remote-device-id', DEVICE_ID, '--remote-host', hub]);
   assert.equal(result.code, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.ok, true);
-  assert.equal(payload.port, relayPort);
-  assert.equal(payload.version, '1.0.16');
+  assert.equal(payload.service, 'test-device');
 });
 
 test('remote CLI preserves structured hub errors when device is offline', async (t) => {
   const hubPort = await getFreePort();
-  await startProcess(t, ['server/hub-server.js'], {
-    BROWSER_RELAY_HUB_HOST: '127.0.0.1',
-    BROWSER_RELAY_HUB_PORT: String(hubPort),
-  }, `http://127.0.0.1:${hubPort}/v1/health`, 'hub');
-
-  const routeId = 'offlineRouteForTest';
-  const secret = 'abcdefghijklmnopqrstuvwxyzABCDEF0123456789';
-  const remoteDeviceId = `brd1_${routeId}_${secret}`;
+  await startHub(t, hubPort);
   const hub = `http://127.0.0.1:${hubPort}`;
 
-  const result = await runCli(t, ['tabs', '--json', '--remote-device-id', remoteDeviceId, '--remote-host', hub]);
+  const result = await runCli(t, ['tabs', '--json', '--remote-device-id', DEVICE_ID, '--remote-host', hub]);
   assert.equal(result.code, 1);
   assert.equal(result.stderr.trim(), '');
   const payload = JSON.parse(result.stdout);
