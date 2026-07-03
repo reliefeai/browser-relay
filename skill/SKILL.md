@@ -36,6 +36,18 @@ WebSocket:  ws://127.0.0.1:18795/extension
 
 No authentication needed — the relay only accepts connections from localhost.
 
+Experimental remote mode keeps the local relay bound to localhost. The user must
+open the extension Options page, enable External Control, and copy the generated
+`remote-device-id` capability. Only then should agents use remote flags:
+
+```bash
+browser-relay tabs --remote-device-id brd1_xxx --remote-host http://127.0.0.1:18796
+```
+
+Never invent or guess a `remote-device-id`; it is a secret capability generated
+by the browser extension. For local hub testing, the user can run
+`browser-relay hub` and set the extension Remote Hub to `http://127.0.0.1:18796`.
+
 ## Preferred CLI Workflow
 
 When shell access is available, use the `browser-relay` CLI for browser

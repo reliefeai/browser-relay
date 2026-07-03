@@ -10,17 +10,23 @@
   "main": "server/relay-server.js",
   "bin": {
     "browser-relay": "server/cli.js",
-    "browser-relay-mcp": "server/mcp-server.js"
+    "browser-relay-mcp": "server/mcp-server.js",
+    "browser-relay-hub": "server/hub-server.js"
   },
   "files": [
     "server/",
     "extension/",
+    "hub/",
+    "docs/",
     "skill/",
     "README.md",
     "README.zh-CN.md"
   ],
   "scripts": {
     "start": "node server/relay-server.js",
+    "hub": "node server/hub-server.js",
+    "hub:dry-run": "wrangler deploy --config hub/wrangler.toml --dry-run",
+    "hub:deploy": "wrangler deploy --config hub/wrangler.toml",
     "mcp": "node server/mcp-server.js",
     "test": "node --test tests/*.test.mjs",
     "pack:dry-run": "npm pack --dry-run",

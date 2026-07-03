@@ -187,8 +187,29 @@ For long text or JavaScript, avoid shell escaping by reading from stdin:
 printf 'hello\nworld' | browser-relay type --selector textarea --stdin
 browser-relay eval --stdin < script.js
 ```
-
 All browser commands accept `--json` for the raw API response and `--tab <id>` to target a specific tab.
+
+### Experimental remote control hub
+
+Local control remains the default. For remote-control testing without exposing
+`0.0.0.0:18795`, run a local hub and enable External Control from the extension
+options page:
+
+```bash
+# terminal 1
+BROWSER_RELAY_HUB_PORT=18796 browser-relay hub
+
+# terminal 2, after the extension generated a remote-device-id
+browser-relay debug \
+  --remote-device-id brd1_xxx \
+  --remote-host http://127.0.0.1:18796 \
+  --json
+```
+
+`remote-device-id` is a capability secret generated in the browser extension;
+keep it private. The local relay still listens on `127.0.0.1` and connects to
+the hub over outbound WebSocket. See `docs/remote-control-hub.md` for the draft
+architecture and implementation plan.
 
 Agent guidance: prefer the CLI for browser interaction. Use the HTTP API when
 you are writing code, tests, or an integration against Browser Relay, or when a

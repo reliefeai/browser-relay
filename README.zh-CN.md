@@ -176,6 +176,23 @@ browser-relay eval --stdin < script.js
 
 所有浏览器操作命令都支持 `--json` 输出原始 API 响应，也支持 `--tab <id>` 指定标签页。
 
+### 实验性远程控制 Hub
+
+默认仍然是本地控制。如果要在不暴露 `0.0.0.0:18795` 的情况下试远程控制，可以先启动本地 Hub，并在扩展 Options 页面打开 External Control：
+
+```bash
+# 终端 1
+BROWSER_RELAY_HUB_PORT=18796 browser-relay hub
+
+# 终端 2：扩展生成 remote-device-id 后
+browser-relay debug \
+  --remote-device-id brd1_xxx \
+  --remote-host http://127.0.0.1:18796 \
+  --json
+```
+
+`remote-device-id` 是浏览器扩展生成的 capability secret，需要像密码一样保管。本地 relay 仍然只监听 `127.0.0.1`，并通过出站 WebSocket 连接 Hub。架构和施工草案见 `docs/remote-control-hub.md`。
+
 Agent 使用规则：浏览器交互默认使用 CLI。只有在编写代码、测试、集成
 Browser Relay，或者当前环境没有 CLI 时，才直接使用 HTTP API。
 

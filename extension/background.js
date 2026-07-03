@@ -1,7 +1,10 @@
 // Browser Relay Extension — Universal CDP agent bridge
 // Core logic adapted from openclaw auto-attach fork, stripped of gateway handshake
 
+import { SNAPSHOT_JS } from './snapshot.js'
+
 const DEFAULT_PORT = 18795
+const DEFAULT_REMOTE_HOST = 'https://relay.linso.ai'
 // Soft-detach a tab's debugger after this many idle seconds so Chrome's
 // "started debugging this browser" infobar disappears while inactive.
 // 0 disables it (debugger stays attached, infobar always shown).
@@ -76,6 +79,14 @@ function clearTabActivity(tabId) {
 let relayWs = null
 /** @type {Promise<void>|null} */
 let relayConnectPromise = null
+/** @type {WebSocket|null} */
+let remoteWs = null
+/** @type {Promise<void>|null} */
+let remoteConnectPromise = null
+let remoteReconnectTimer = null
+let remoteConfig = null
+let remoteConnectedAt = null
+let remoteLastError = null
 let nextSession = 1
 
 /** @type {Map<number, {state:'connecting'|'connected', sessionId?:string, targetId?:string, attachOrder?:number, idle?:boolean, lastActivity?:number}>} */
@@ -448,7 +459,11 @@ async function attachTab(tabId, opts = {}) {
   void chrome.action.setTitle({ tabId, title: 'Browser Relay: attached (click to detach)' })
 
   if (!opts.skipAttachedEvent) {
-    sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.attachedToTarget', params: { sessionId, targetInfo: { ...targetInfo, attached: true }, waitingForDebugger: false } } })
+    // Best-effort notify the local daemon. Remote (External Control) attaches
+    // tabs the same way but has no daemon, so a closed relay must not fail attach.
+    try {
+      sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.attachedToTarget', params: { sessionId, targetInfo: { ...targetInfo, attached: true }, waitingForDebugger: false } } })
+    } catch { /* local relay down — fine for remote mode */ }
   }
 
   setBadge(tabId, 'on')
@@ -859,7 +874,430 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       }
     }
   }
+
+  // Keep the External Control hub connection alive across service-worker
+  // restarts: if enabled but not connected, reconnect on this 30s tick.
+  const remoteCfg = await getRemoteConfig()
+  if (remoteCfg && !remoteConnected() && !remoteConnectPromise) {
+    await ensureRemoteHubConnection().catch(() => {})
+  }
 })
+
+// ============================================================================
+// Remote hub (External Control): the extension connects OUT to the Cloudflare
+// hub over WSS and executes rpc.request frames itself, so a remote CLI can drive
+// this browser with no local port exposed. Local mode (relayWs) is untouched.
+// ============================================================================
+
+const REMOTE_RECONNECT_DELAYS = [1000, 2000, 5000, 10000, 15000]
+let remoteReconnectAttempt = 0
+
+function remoteConnected() {
+  return !!remoteWs && remoteWs.readyState === WebSocket.OPEN
+}
+
+function remoteWsBase(host) {
+  const h = String(host || DEFAULT_REMOTE_HOST).trim().replace(/\/+$/, '')
+  if (h.startsWith('https://')) return `wss://${h.slice('https://'.length)}`
+  if (h.startsWith('http://')) return `ws://${h.slice('http://'.length)}`
+  if (h.startsWith('wss://') || h.startsWith('ws://')) return h
+  return `wss://${h}`
+}
+
+async function getRemoteConfig() {
+  const s = await chrome.storage.local.get(['remoteControlEnabled', 'remoteHost', 'remoteRouteId', 'remoteSecret', 'remoteDeviceId'])
+  if (!s.remoteControlEnabled || !s.remoteRouteId || !s.remoteSecret) return null
+  return {
+    remoteHost: s.remoteHost || DEFAULT_REMOTE_HOST,
+    remoteRouteId: s.remoteRouteId,
+    remoteSecret: s.remoteSecret,
+    remoteDeviceId: s.remoteDeviceId,
+  }
+}
+
+function remoteStatusPayload() {
+  return {
+    enabled: !!remoteConfig,
+    connected: remoteConnected(),
+    deviceId: remoteConfig?.remoteDeviceId || null,
+    connectedAt: remoteConnectedAt,
+    lastError: remoteLastError,
+  }
+}
+
+// Browsers can't set headers on WebSocket, so the secret rides in ?token=
+// (the hub accepts token OR Authorization: Bearer).
+function remoteHubUrl(config) {
+  const base = remoteWsBase(config.remoteHost)
+  return `${base}/v1/device/connect?routeId=${encodeURIComponent(config.remoteRouteId)}&token=${encodeURIComponent(config.remoteSecret)}`
+}
+
+async function ensureRemoteHubConnection() {
+  const cfg = await getRemoteConfig()
+  if (!cfg) { remoteConfig = null; return false }
+  remoteConfig = cfg
+  if (remoteConnected()) return true
+  if (remoteConnectPromise) { try { await remoteConnectPromise } catch { /* fall through */ } return remoteConnected() }
+
+  remoteConnectPromise = (async () => {
+    const ws = new WebSocket(remoteHubUrl(cfg))
+    remoteWs = ws
+    ws.onmessage = (event) => { void whenReady(() => handleHubMessage(String(event.data || ''))) }
+
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('Hub connect timeout')), 8000)
+      ws.onopen = () => { clearTimeout(t); resolve() }
+      ws.onerror = () => { clearTimeout(t); reject(new Error('Hub connect failed')) }
+      ws.onclose = (ev) => { clearTimeout(t); reject(new Error(`Hub closed (${ev.code})`)) }
+    })
+
+    ws.send(JSON.stringify({
+      type: 'device.hello',
+      version: chrome.runtime.getManifest().version,
+      routeId: cfg.remoteRouteId,
+      deviceName: 'Browser Relay',
+      capabilities: ['tabs', 'eval', 'snapshot', 'click', 'type', 'key', 'scroll', 'navigate', 'screenshot'],
+    }))
+
+    ws.onclose = () => { if (ws !== remoteWs) return; onRemoteHubClosed('closed') }
+    ws.onerror = () => { if (ws !== remoteWs) return; onRemoteHubClosed('error') }
+  })()
+
+  try {
+    await remoteConnectPromise
+    remoteReconnectAttempt = 0
+    remoteConnectedAt = Date.now()
+    remoteLastError = null
+    return true
+  } catch (err) {
+    remoteLastError = err instanceof Error ? err.message : String(err)
+    remoteWs = null
+    scheduleRemoteReconnect()
+    return false
+  } finally {
+    remoteConnectPromise = null
+  }
+}
+
+function onRemoteHubClosed(reason) {
+  remoteWs = null
+  remoteConnectedAt = null
+  remoteLastError = `disconnected (${reason})`
+  scheduleRemoteReconnect()
+}
+
+function scheduleRemoteReconnect() {
+  if (remoteReconnectTimer) return
+  void getRemoteConfig().then((cfg) => {
+    if (!cfg) return // disabled — stop reconnecting
+    const delay = REMOTE_RECONNECT_DELAYS[Math.min(remoteReconnectAttempt, REMOTE_RECONNECT_DELAYS.length - 1)]
+    remoteReconnectTimer = setTimeout(() => {
+      remoteReconnectTimer = null
+      remoteReconnectAttempt++
+      void ensureRemoteHubConnection()
+    }, delay)
+  })
+}
+
+function closeRemoteHub({ disable = false } = {}) {
+  if (remoteReconnectTimer) { clearTimeout(remoteReconnectTimer); remoteReconnectTimer = null }
+  remoteReconnectAttempt = 0
+  const ws = remoteWs
+  remoteWs = null
+  remoteConnectedAt = null
+  if (ws) { try { ws.onclose = null; ws.onerror = null; ws.close() } catch { /* ignore */ } }
+  if (disable) { remoteConfig = null; remoteLastError = null }
+}
+
+// Execute one rpc.request from the hub, reply with rpc.response.
+async function handleHubMessage(text) {
+  let msg
+  try { msg = JSON.parse(text) } catch { return }
+  if (msg?.type !== 'rpc.request') return
+  let response
+  try {
+    const result = await executeRemoteApi(String(msg.method || 'GET'), String(msg.path || ''), msg.body)
+    response = { type: 'rpc.response', id: msg.id, status: result.status || 200, headers: { 'content-type': 'application/json' }, body: result.body }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    response = { type: 'rpc.response', id: msg.id, status: 500, headers: { 'content-type': 'application/json' }, body: { ok: false, code: 'remote_exec_failed', error: message, message } }
+  }
+  try { if (remoteConnected()) remoteWs.send(JSON.stringify(response)) } catch { /* hub gone */ }
+}
+
+// ---- Remote command executor: run the CLI's /api/* semantics inside the
+// extension using chrome.debugger directly (no Node relay in the loop). ----
+
+function apiError(code, message, status = 400) {
+  return { status, body: { ok: false, code, error: message, message } }
+}
+
+// Resolve the CLI's tabId param (chrome tab id, or legacy CDP targetId) to a
+// chrome tab id; with no param, pick the active tab, else first attachable one.
+async function resolveRemoteTabId(tabIdParam) {
+  if (tabIdParam !== undefined && tabIdParam !== null && tabIdParam !== '') {
+    const n = Number(tabIdParam)
+    if (Number.isFinite(n)) {
+      try { await chrome.tabs.get(n); return n } catch { /* not a live tab id */ }
+    }
+    const byTarget = getTabByTargetId(String(tabIdParam))
+    if (byTarget) return byTarget
+    throw new Error(`No tab matches ${tabIdParam}`)
+  }
+  const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+  if (active && isAttachableUrl(active.url)) return active.id
+  for (const t of await chrome.tabs.query({})) if (isAttachableUrl(t.url)) return t.id
+  throw new Error('No controllable tab found')
+}
+
+async function ensureRemoteAttached(tabId) {
+  const tab = tabs.get(tabId)
+  if (tab?.state === 'connected') {
+    if (tab.idle) await wakeTab(tabId)
+    return
+  }
+  await attachTab(tabId)
+}
+
+// Run a CDP command against a chrome tab, attaching on demand.
+async function remoteCdp(tabId, method, params) {
+  await ensureRemoteAttached(tabId)
+  return await chrome.debugger.sendCommand({ tabId }, method, params || {})
+}
+
+async function executeRemoteApi(method, path, body) {
+  const u = new URL(String(path || '/'), 'http://relay.local')
+  const p = u.pathname
+  const payload = body && typeof body === 'object' ? body : {}
+
+  if (method === 'GET' && p === '/api/tabs') return { status: 200, body: await apiListTabs() }
+  if (method === 'POST' && p === '/api/eval') return { status: 200, body: await apiEval(payload, u.searchParams) }
+  if (method === 'POST' && p === '/api/navigate') return { status: 200, body: await apiNavigate(payload) }
+  if (method === 'POST' && p === '/api/click') return { status: 200, body: await apiClick(payload) }
+  if (method === 'POST' && p === '/api/type') return { status: 200, body: await apiType(payload) }
+  if (method === 'POST' && p === '/api/key') return { status: 200, body: await apiKey(payload) }
+  if (method === 'POST' && p === '/api/scroll') return { status: 200, body: await apiScroll(payload) }
+  if (method === 'GET' && p === '/api/snapshot') return { status: 200, body: await apiSnapshot(payload, u.searchParams) }
+  if ((method === 'GET' || method === 'POST') && p === '/api/screenshot') return { status: 200, body: await apiScreenshot(payload, u.searchParams) }
+
+  return apiError('unknown_endpoint', `Unknown or not-yet-supported remote endpoint: ${method} ${p}`, 404)
+}
+
+async function apiListTabs() {
+  const list = []
+  for (const t of await chrome.tabs.query({})) {
+    if (!isAttachableUrl(t.url)) continue
+    list.push({ id: t.id, title: t.title || '', url: t.url || '', attached: tabs.get(t.id)?.state === 'connected' })
+  }
+  return { ok: true, tabs: list }
+}
+
+async function apiEval(body, searchParams) {
+  const expression = String(body.expression ?? '')
+  if (!expression) return apiError('validation_error', 'expression is required').body
+  const tabId = await resolveRemoteTabId(body.tabId ?? searchParams.get('tabId'))
+  const returnByValue = body.returnByValue !== false
+  const result = await remoteCdp(tabId, 'Runtime.evaluate', { expression, returnByValue, awaitPromise: true })
+  return { ok: true, result: result?.result || null, exceptionDetails: result?.exceptionDetails || null }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+function elementNotFound(selector) {
+  return { ok: false, code: 'element_not_found', found: false, error: `Element not found: ${selector}`, message: `Element not found: ${selector}`, selector }
+}
+
+async function evalValue(tabId, expression) {
+  const r = await remoteCdp(tabId, 'Runtime.evaluate', { expression, returnByValue: true })
+  return r?.result?.value
+}
+
+async function apiNavigate(body) {
+  const url = String(body.url ?? '')
+  if (!url) return apiError('validation_error', 'url is required').body
+  const tabId = await resolveRemoteTabId(body.tabId)
+  const result = await remoteCdp(tabId, 'Page.navigate', { url })
+  await sleep(500)
+  let title = '', finalUrl = url
+  try {
+    title = (await evalValue(tabId, 'document.title')) || ''
+    finalUrl = (await evalValue(tabId, 'location.href')) || url
+  } catch { /* non-critical */ }
+  return { ok: true, url: finalUrl, title, ...result }
+}
+
+// findJs returns JSON {found, x, y, text} for the element centre in viewport coords.
+function findElementJs(selector) {
+  return `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return JSON.stringify({ found: false }); var rect = el.getBoundingClientRect(); return JSON.stringify({ found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (el.innerText || el.textContent || '').trim().slice(0, 100) }); })()`
+}
+
+async function apiClick(body) {
+  const selector = body.selector
+  if (!selector || typeof selector !== 'string') return apiError('validation_error', 'selector is required').body
+  const tabId = await resolveRemoteTabId(body.tabId)
+  const findJs = findElementJs(selector)
+  const el = JSON.parse((await evalValue(tabId, findJs)) || '{"found":false}')
+  if (!el.found) return elementNotFound(selector)
+
+  const button = body.button || 'left'
+  const clickCount = body.doubleClick ? 2 : 1
+  await remoteCdp(tabId, 'Runtime.evaluate', { expression: `document.querySelector(${JSON.stringify(selector)})?.scrollIntoView({block:'center'})`, returnByValue: true }).catch(() => {})
+  const el2 = JSON.parse((await evalValue(tabId, findJs)) || '{"found":false}')
+  const fx = Math.round(el2.found ? el2.x : el.x)
+  const fy = Math.round(el2.found ? el2.y : el.y)
+
+  await remoteCdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: fx, y: fy })
+  await remoteCdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: fx, y: fy, button, clickCount })
+  await remoteCdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: fx, y: fy, button, clickCount })
+  return { ok: true, clicked: true, elementText: el2.text || el.text || '', selector }
+}
+
+async function apiType(body) {
+  const text = body.text
+  if (typeof text !== 'string') return apiError('validation_error', 'text is required').body
+  const tabId = await resolveRemoteTabId(body.tabId)
+  const selector = body.selector
+
+  if (selector) {
+    const focusJs = `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return JSON.stringify({ found: false }); el.focus(); return JSON.stringify({ found: true }); })()`
+    const info = JSON.parse((await evalValue(tabId, focusJs)) || '{"found":false}')
+    if (!info.found) return elementNotFound(selector)
+  }
+
+  if (body.clear) {
+    await remoteCdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 2 })
+    await remoteCdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', modifiers: 2 })
+    await remoteCdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace' })
+    await remoteCdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace' })
+  }
+
+  await remoteCdp(tabId, 'Input.insertText', { text })
+
+  if (body.submit) {
+    const enter = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }
+    await remoteCdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', ...enter })
+    await remoteCdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...enter })
+  }
+  return { ok: true, typed: true }
+}
+
+// Pragmatic key support: common named keys + modifier combos (e.g. "ctrl+a",
+// "Enter", "ArrowDown"). Not the full relay key table, but covers typical use.
+const NAMED_KEYS = {
+  enter: { key: 'Enter', code: 'Enter', vk: 13, text: '\r' },
+  tab: { key: 'Tab', code: 'Tab', vk: 9 },
+  escape: { key: 'Escape', code: 'Escape', vk: 27 },
+  esc: { key: 'Escape', code: 'Escape', vk: 27 },
+  backspace: { key: 'Backspace', code: 'Backspace', vk: 8 },
+  delete: { key: 'Delete', code: 'Delete', vk: 46 },
+  space: { key: ' ', code: 'Space', vk: 32, text: ' ' },
+  arrowup: { key: 'ArrowUp', code: 'ArrowUp', vk: 38 },
+  arrowdown: { key: 'ArrowDown', code: 'ArrowDown', vk: 40 },
+  arrowleft: { key: 'ArrowLeft', code: 'ArrowLeft', vk: 37 },
+  arrowright: { key: 'ArrowRight', code: 'ArrowRight', vk: 39 },
+  home: { key: 'Home', code: 'Home', vk: 36 },
+  end: { key: 'End', code: 'End', vk: 35 },
+  pageup: { key: 'PageUp', code: 'PageUp', vk: 33 },
+  pagedown: { key: 'PageDown', code: 'PageDown', vk: 34 },
+}
+const KEY_MODIFIERS = { alt: 1, control: 2, ctrl: 2, shift: 8, meta: 4, cmd: 4, command: 4 }
+
+function buildKeyInput(body) {
+  const raw = (typeof body.combo === 'string' && body.combo.trim()) || (typeof body.key === 'string' && body.key.trim()) || ''
+  if (!raw) return null
+  const parts = String(raw).split('+').map((s) => s.trim()).filter(Boolean)
+  const keyPart = parts[parts.length - 1] || raw
+  let modifiers = 0
+  for (const m of parts.slice(0, -1)) modifiers |= (KEY_MODIFIERS[m.toLowerCase()] || 0)
+
+  const named = NAMED_KEYS[keyPart.toLowerCase()]
+  if (named) {
+    return { key: named.key, code: named.code, windowsVirtualKeyCode: named.vk, nativeVirtualKeyCode: named.vk, text: modifiers ? '' : (named.text || ''), modifiers }
+  }
+  if (keyPart.length === 1) {
+    const code = /[a-zA-Z]/.test(keyPart) ? `Key${keyPart.toUpperCase()}` : /[0-9]/.test(keyPart) ? `Digit${keyPart}` : ''
+    const vk = keyPart.toUpperCase().charCodeAt(0)
+    return { key: keyPart, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, text: modifiers ? '' : keyPart, modifiers }
+  }
+  return null
+}
+
+async function apiKey(body) {
+  const input = buildKeyInput(body)
+  if (!input) return apiError('validation_error', 'key or combo is required').body
+  const tabId = await resolveRemoteTabId(body.tabId)
+  const base = { key: input.key, code: input.code, windowsVirtualKeyCode: input.windowsVirtualKeyCode, nativeVirtualKeyCode: input.nativeVirtualKeyCode, modifiers: input.modifiers }
+  const down = input.text ? { ...base, text: input.text, unmodifiedText: input.text } : base
+  await remoteCdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', ...down })
+  await remoteCdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+  return { ok: true, pressed: true, ...input }
+}
+
+async function apiScroll(body) {
+  const tabId = await resolveRemoteTabId(body.tabId)
+  const direction = body.direction || 'down'
+  const amount = body.amount || 800
+  const js = direction === 'bottom'
+    ? 'window.scrollTo(0, document.body.scrollHeight)'
+    : direction === 'top'
+      ? 'window.scrollTo(0, 0)'
+      : `window.scrollBy(0, ${direction === 'down' ? amount : -amount})`
+  await remoteCdp(tabId, 'Runtime.evaluate', { expression: js, returnByValue: true })
+  return { ok: true, scrolled: true, direction }
+}
+
+async function apiSnapshot(body, searchParams) {
+  const tabId = await resolveRemoteTabId(body.tabId ?? searchParams.get('tabId'))
+  const format = (body.format ?? searchParams.get('format')) || 'text'
+  const maxLength = parseInt(String(body.maxLength ?? searchParams.get('maxLength') ?? '100000'), 10)
+
+  if (format === 'html') {
+    let html = (await evalValue(tabId, 'document.documentElement.outerHTML')) || ''
+    const truncated = html.length > maxLength
+    if (truncated) html = html.slice(0, maxLength)
+    return { ok: true, url: (await evalValue(tabId, 'location.href')) || '', title: (await evalValue(tabId, 'document.title')) || '', html, truncated }
+  }
+
+  const jsWithMaxLen = `var __maxLength = ${maxLength};\n${SNAPSHOT_JS}`
+  const raw = await evalValue(tabId, jsWithMaxLen)
+  let snapshot = '', truncated = false
+  try { const parsed = JSON.parse(raw || '{}'); snapshot = parsed.snapshot || ''; truncated = parsed.truncated || false } catch { snapshot = raw || '' }
+  return { ok: true, url: (await evalValue(tabId, 'location.href')) || '', title: (await evalValue(tabId, 'document.title')) || '', snapshot, truncated }
+}
+
+function base64Bytes(d) {
+  const len = String(d || '').length
+  if (!len) return 0
+  const pad = d.endsWith('==') ? 2 : d.endsWith('=') ? 1 : 0
+  return Math.floor(len * 3 / 4) - pad
+}
+
+async function apiScreenshot(body, searchParams) {
+  const tabId = await resolveRemoteTabId(body.tabId ?? searchParams.get('tabId'))
+  const fullPage = body.fullPage === true || searchParams.get('fullPage') === 'true'
+
+  if (fullPage) {
+    let width = null, height = null, fallbackError = null
+    try {
+      const metrics = await remoteCdp(tabId, 'Page.getLayoutMetrics', {})
+      const size = metrics?.cssContentSize || metrics?.contentSize || metrics?.cssLayoutViewport || metrics?.layoutViewport
+      const rw = Number(size?.width), rh = Number(size?.height)
+      if (Number.isFinite(rw) && Number.isFinite(rh) && rw > 0 && rh > 0) {
+        width = Math.ceil(rw); height = Math.ceil(rh)
+        const r = await remoteCdp(tabId, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: { x: 0, y: 0, width, height, scale: 1 } })
+        const data = r?.data || ''
+        return { ok: true, data, format: 'png', fullPage: true, strategy: 'fullPageClip', width, height, bytes: base64Bytes(data) }
+      }
+    } catch (err) { fallbackError = err instanceof Error ? err.message : String(err) }
+    const r = await remoteCdp(tabId, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: true })
+    const data = r?.data || ''
+    return { ok: true, data, format: 'png', fullPage: true, strategy: 'captureBeyondViewport', width, height, bytes: base64Bytes(data), fallbackError }
+  }
+
+  const r = await remoteCdp(tabId, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
+  const data = r?.data || ''
+  return { ok: true, data, format: 'png', fullPage: false, strategy: 'viewport', bytes: base64Bytes(data) }
+}
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'relayCheck') {
@@ -902,6 +1340,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true
   }
 
+  // options.js drives External Control through these three messages. It has
+  // already written the capability to chrome.storage.local before enabling.
+  if (msg?.type === 'enableRemoteControl') {
+    ;(async () => {
+      closeRemoteHub() // drop any stale connection (e.g. on Regenerate)
+      const connected = await ensureRemoteHubConnection()
+      sendResponse({ connected, lastError: remoteLastError })
+    })()
+    return true
+  }
+
+  if (msg?.type === 'disableRemoteControl') {
+    closeRemoteHub({ disable: true })
+    sendResponse({ ok: true })
+    return true
+  }
+
+  if (msg?.type === 'getRemoteControlStatus') {
+    ;(async () => {
+      if (!remoteConnected()) await ensureRemoteHubConnection().catch(() => {})
+      sendResponse(remoteStatusPayload())
+    })()
+    return true
+  }
+
   return false
 })
 
@@ -912,6 +1375,8 @@ initPromise.then(() => {
     reconnectAttempt = 0
     return recoverRelaySession()
   }).catch(() => { scheduleReconnect() })
+  // Restore External Control on startup if the user left it enabled.
+  void ensureRemoteHubConnection().catch(() => {})
 })
 
 async function whenReady(fn) {

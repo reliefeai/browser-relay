@@ -1,0 +1,17 @@
+name = "browser-relay-hub"
+main = "src/worker.js"
+compatibility_date = "2025-12-01"
+workers_dev = true
+
+routes = [
+  { pattern = "relay.linso.ai", custom_domain = true }
+]
+
+[durable_objects]
+bindings = [
+  { name = "DEVICES", class_name = "BrowserRelayDevice" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BrowserRelayDevice"]
