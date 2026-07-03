@@ -30,7 +30,7 @@ Browser Relay 补的就是这一层(也是很多人在找的 OpenClaw Browser Re
 
 - **就是你自己的 Chrome 会话** —— Cookie、localStorage、扩展、登录状态,原样共用。
 - **不弹自动化浏览器** —— 不开额外窗口、不在背后建标签;普通导航复用已附加的标签页。
-- **本地或远程** —— 在本机控制,或通过 Cloudflare 中转站从任何地方控制,且不暴露任何公网端口。
+- **本地或远程** —— 在本机控制,或通过公网 Relay 服务(可一键部署到 Cloudflare 自建)从任何地方控制,且不暴露任何公网端口。
 - **面向 Agent** —— 自带 Skill、MCP server、简单的 HTTP API;适配 Claude、Claude Code、Cursor、Windsurf、自定义 Agent 和脚本。
 - **本地优先边界** —— 默认只监听 `127.0.0.1`。
 
@@ -48,12 +48,12 @@ Browser Relay 补的就是这一层(也是很多人在找的 OpenClaw Browser Re
                                  Chrome 扩展 ──chrome.debugger / CDP──▶ 你的 Chrome 标签页
 
 远程（Remote Relay）
-  AI Agent ──HTTPS──▶ Cloudflare 中转站 (relay.linso.ai) ◀──WSS── Chrome 扩展 ──▶ 你的 Chrome 标签页
+  AI Agent ──HTTPS──▶ 公网 Relay 服务 (relay.linso.ai) ◀──WSS── Chrome 扩展 ──▶ 你的 Chrome 标签页
 ```
 
 **本地模式**是默认:Agent 连本机 `127.0.0.1` 上的 relay 服务器,由它把 Chrome DevTools Protocol 命令转发给扩展。
 
-**远程模式**不暴露任何东西。打开 Remote Relay 后,扩展会主动**出站**连到一个 Cloudflare Worker + Durable Object 中转站;远程的 CLI 连到同一个中转站,中转站顺着这条已有连接把每条命令下发到你的浏览器 —— 没有开放端口,网络上也没有本地服务。命令由扩展用 `chrome.debugger` 自己执行,所以远程控制不依赖本地 relay。
+**远程模式**不暴露任何东西。打开 Remote Relay 后,扩展会主动**出站**连到公网 Relay 服务;远程的 CLI 连到同一个服务,由它顺着这条已有连接把每条命令下发到你的浏览器 —— 没有开放端口,网络上也没有本地服务。命令由扩展用 `chrome.debugger` 自己执行,所以远程控制不依赖本地 relay。可以用默认的托管服务,也可以一键部署到 Cloudflare 自建(见下文)。
 
 ## 快速开始
 
@@ -127,20 +127,24 @@ browser-relay eval --stdin < script.js
 
 ### 远程控制（Remote Relay）
 
-要从**另一台机器**(CI、远程 agent、不同网络)控制这个浏览器,在扩展 Options 页面打开 **Remote Relay**。浏览器会主动连到托管的 Cloudflare 中转站(`relay.linso.ai`)——不开放任何公网端口,也不暴露本地服务。
+要从**另一台机器**(CI、远程 agent、不同网络)控制这个浏览器,在扩展 Options 页面打开 **Remote Relay**。浏览器会主动连到公网 Relay 服务(默认是托管的 `relay.linso.ai`)——不开放任何公网端口,也不暴露本地服务。
 
-打开后会生成一个保密的 **Device ID**,形如 `br-rFRgVldvb6HTVr7c`——请像密码一样保管。在任何地方把它传给同样的 CLI 命令(默认就走托管中转站):
+打开后会生成一个保密的 **Device ID**——请像密码一样保管,在任何地方传给同样的 CLI 命令即可:
 
 ```bash
-browser-relay tabs --remote-device-id br-rFRgVldvb6HTVr7c
-browser-relay eval "location.href" --remote-device-id br-rFRgVldvb6HTVr7c
+browser-relay tabs --remote-device-id br-xxxx
+browser-relay eval "location.href" --remote-device-id br-xxxx
 
 # 存个别名,以后不用重复贴长 id(remote ls / rm 管理):
-browser-relay remote add mymac br-rFRgVldvb6HTVr7c
+browser-relay remote add mymac br-xxxx
 browser-relay tabs --remote mymac
 ```
 
-**自部署:** 中转站就是 `hub/` 里一个小的 Cloudflare Worker + Durable Object。可以部署你自己的,把 Options 页面的 *Remote Hub* 填成你的 Worker 地址(`npm run hub:deploy`,或 Options 里的一键 Deploy to Cloudflare 按钮)。中转站只在内存里保存 secret 的哈希,不落盘。`remote-device-id` 是一个 capability:Remote Relay 开着时,拿到它的人就能控制这个浏览器。设计见 `docs/remote-control-hub.md`。
+**自建你自己的 Relay 服务** —— 一键部署到 Cloudflare,然后把 Options 页面的 *公网 Relay 服务* 填成你的 Worker 地址:
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub)
+
+`remote-device-id` 是一个 capability —— Remote Relay 开着时,拿到它的人就能控制这个浏览器。设计见 `docs/remote-control-hub.md`。
 
 ### CLI 参考
 
@@ -239,7 +243,7 @@ curl -X POST http://127.0.0.1:18795/api/click \
 
 真实 Chrome 下载需要扩展的 `downloads` 权限。从旧版本升级后,需在 `chrome://extensions` 里重新加载 unpacked 扩展。
 
-这些接口远程同样可用:带 `--remote-device-id` 的 CLI 会把它们经中转站发到浏览器。
+这些接口远程同样可用:带 `--remote-device-id` 的 CLI 会把它们经公网 Relay 服务发到浏览器。
 
 ## 配置
 
@@ -249,7 +253,7 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `BROWSER_RELAY_HOST` | `127.0.0.1` | HTTP 和 WebSocket 监听地址 |
 | `BROWSER_RELAY_PORT` | `18795` | HTTP 和 WebSocket 端口 |
 | `BROWSER_RELAY_REMOTE_DEVICE_ID` | — | 未传 `--remote-device-id` 时使用的远程 Device ID(或别名) |
-| `BROWSER_RELAY_REMOTE_HOST` | `https://relay.linso.ai` | 远程命令使用的中转站地址 |
+| `BROWSER_RELAY_REMOTE_HOST` | `https://relay.linso.ai` | 远程命令使用的公网 Relay 服务地址 |
 
 Chrome 扩展端口可以在扩展 Options 页面修改。
 
@@ -268,7 +272,7 @@ npm test
 
 - Chrome 扩展使用 `debugger` 权限,只安装你信任的版本。
 - 默认只监听 `127.0.0.1`,不要把 relay server 暴露到公网。
-- Remote Relay 从不开放端口:浏览器主动出站连中转站,中转站只在内存里保存 Device ID secret 的哈希。Device ID 请像密码一样保管;Remote Relay 开着时,拿到它的人就能控制浏览器。
+- Remote Relay 从不开放端口:浏览器主动出站连公网 Relay 服务,它只在内存里保存 Device ID 的哈希。Device ID 请像密码一样保管;Remote Relay 开着时,拿到它的人就能控制浏览器。
 - Browser Relay 会让 Agent 访问你的真实浏览器状态,因此启用的 Agent 应被视为可信本地软件。
 
 ## License

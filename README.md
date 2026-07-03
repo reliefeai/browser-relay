@@ -38,7 +38,7 @@ Browser Relay is that missing layer:
 
 - **Your actual Chrome session** — cookies, localStorage, extensions, and login state, shared as-is.
 - **No pop-up automation browser** — it never spawns a separate window or opens tabs behind your back; navigation reuses an attached tab.
-- **Local or remote** — drive the browser from this machine, or from anywhere through a Cloudflare relay, with no public port exposed.
+- **Local or remote** — drive the browser from this machine, or from anywhere through a public relay service (self-hostable on Cloudflare in one click), with no public port exposed.
 - **Agent-first** — a bundled Skill, an MCP server, and a simple HTTP API; works with Claude, Claude Code, Cursor, Windsurf, custom agents, and scripts.
 - **Local-first boundary** — the relay binds to `127.0.0.1` by default.
 
@@ -56,12 +56,12 @@ Local
                                  Chrome extension ──chrome.debugger / CDP──▶ your Chrome tabs
 
 Remote (Remote Relay)
-  AI Agent ──HTTPS──▶ Cloudflare hub (relay.linso.ai) ◀──WSS── Chrome extension ──▶ your Chrome tabs
+  AI Agent ──HTTPS──▶ public relay (relay.linso.ai) ◀──WSS── Chrome extension ──▶ your Chrome tabs
 ```
 
 **Local mode** is the default: the agent talks to a relay server on `127.0.0.1`, which forwards Chrome DevTools Protocol commands to the extension.
 
-**Remote mode** exposes nothing. When you turn on Remote Relay, the extension connects *out* to a Cloudflare Worker + Durable Object hub. A remote CLI reaches that same hub, which routes each command over the existing connection down to your browser — no open ports, no local server on the network. The extension executes commands itself via `chrome.debugger`, so remote control does not depend on the local relay.
+**Remote mode** exposes nothing. When you turn on Remote Relay, the extension connects *out* to a public relay service; a remote CLI reaches that same service, which routes each command down to your browser over the existing connection — no open ports, no local server on the network. Use the default hosted relay, or run your own on Cloudflare in one click (see below).
 
 ## Quick Start
 
@@ -141,20 +141,24 @@ All browser commands accept `--json` for the raw API response and `--tab <id>` t
 
 ### Remote control (Remote Relay)
 
-To drive this browser from **another machine** — a CI box, a remote agent, a different network — turn on **Remote Relay** in the extension's Options page. The browser connects out to a hosted Cloudflare hub (`relay.linso.ai`); nothing listens on a public port and no local server is exposed.
+To drive this browser from **another machine** — a CI box, a remote agent, a different network — turn on **Remote Relay** in the extension's Options page. The browser connects out to a public relay service (the hosted `relay.linso.ai` by default); nothing listens on a public port and no local server is exposed.
 
-Turning it on mints a secret **Device ID** like `br-rFRgVldvb6HTVr7c` — treat it like a password. Pass it to the same CLI commands from anywhere (the hosted hub is the default host):
+Turning it on mints a secret **Device ID** — treat it like a password. Pass it to the same CLI commands from anywhere:
 
 ```bash
-browser-relay tabs --remote-device-id br-rFRgVldvb6HTVr7c
-browser-relay eval "location.href" --remote-device-id br-rFRgVldvb6HTVr7c
+browser-relay tabs --remote-device-id br-xxxx
+browser-relay eval "location.href" --remote-device-id br-xxxx
 
 # Save an alias once so you don't retype the id (remote ls / rm to manage):
-browser-relay remote add mymac br-rFRgVldvb6HTVr7c
+browser-relay remote add mymac br-xxxx
 browser-relay tabs --remote mymac
 ```
 
-**Self-hosting:** the hub is a small Cloudflare Worker + Durable Object in `hub/`. Deploy your own and point the Options page's *Remote Hub* field at your Worker URL (`npm run hub:deploy`, or the one-click Deploy to Cloudflare button in Options). The hub only ever holds a hash of the secret, in memory — nothing is persisted. The `remote-device-id` is a capability: anyone holding it can control this browser while Remote Relay is on. See `docs/remote-control-hub.md` for the design.
+**Run your own relay** instead of the hosted one — deploy it to Cloudflare in one click, then set the Options page's *Public relay* field to your Worker URL:
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub)
+
+The `remote-device-id` is a capability — anyone with it can control this browser while Remote Relay is on. Design notes: `docs/remote-control-hub.md`.
 
 ### CLI reference
 
@@ -261,7 +265,7 @@ curl -X POST http://127.0.0.1:18795/api/click \
 
 Real Chrome downloads require the extension's `downloads` permission. After upgrading from an older Browser Relay version, reload the unpacked extension in `chrome://extensions`.
 
-The same endpoints are reachable remotely: a CLI running with `--remote-device-id` sends them through the hub to the browser.
+The same endpoints are reachable remotely: a CLI running with `--remote-device-id` sends them through the public relay to the browser.
 
 ## Configuration
 
@@ -271,7 +275,7 @@ The same endpoints are reachable remotely: a CLI running with `--remote-device-i
 | `BROWSER_RELAY_HOST` | `127.0.0.1` | HTTP and WebSocket bind address |
 | `BROWSER_RELAY_PORT` | `18795` | HTTP and WebSocket port |
 | `BROWSER_RELAY_REMOTE_DEVICE_ID` | — | Remote Device ID (or alias) used when no `--remote-device-id` flag is passed |
-| `BROWSER_RELAY_REMOTE_HOST` | `https://relay.linso.ai` | Remote hub URL for remote commands |
+| `BROWSER_RELAY_REMOTE_HOST` | `https://relay.linso.ai` | Public relay URL for remote commands |
 
 The Chrome extension port can be changed from the extension Options page.
 
@@ -299,7 +303,7 @@ Load the local `extension/` directory from `chrome://extensions` in Developer mo
 
 - The extension uses Chrome's `debugger` permission. Install only versions you trust.
 - The relay binds to `127.0.0.1` by default. Do not expose it to the public internet.
-- Remote Relay never opens a port: the browser connects out to the hub, which only stores a hash of your Device ID secret in memory. Treat the Device ID like a password; anyone with it can control the browser while Remote Relay is on.
+- Remote Relay never opens a port: the browser connects out to the public relay, which only holds a hash of your Device ID secret in memory. Treat the Device ID like a password; anyone with it can control the browser while Remote Relay is on.
 - Browser Relay gives agents access to the same browser state you have, so treat enabled agents as trusted local software.
 
 ## License
