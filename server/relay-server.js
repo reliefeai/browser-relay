@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 import { SNAPSHOT_JS } from "./snapshot.js";
-import { buildRemoteDeviceId, errorPayload, remoteWsBase } from "./remote-protocol.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -68,13 +67,6 @@ const networkEnabledSessions = new Set();
 let nextDownloadEntryId = 1;
 let downloadEntries = [];
 
-let remoteConfig = null; // { hub, routeId, secret, remoteDeviceId, deviceName }
-let remoteWs = null;
-let remoteConnectPromise = null;
-let remoteReconnectTimer = null;
-let remoteConnectedAt = null;
-let remoteLastError = null;
-
 let pingTimer = null;
 let graceTimer = null;
 const reconnectWaiters = new Set();
@@ -108,168 +100,6 @@ function waitForExtension(timeoutMs = 3_000) {
     const timer = setTimeout(() => waiter(false), timeoutMs);
     reconnectWaiters.add(waiter);
   });
-}
-
-// ---------------------------------------------------------------------------
-// Remote Hub outbound connection
-// ---------------------------------------------------------------------------
-function remoteConnected() {
-  return remoteWs?.readyState === WebSocket.OPEN;
-}
-
-function remoteStatusPayload() {
-  return {
-    ok: true,
-    enabled: !!remoteConfig,
-    connected: remoteConnected(),
-    hub: remoteConfig?.hub || null,
-    routeId: remoteConfig?.routeId || null,
-    remoteDeviceId: remoteConfig?.remoteDeviceId || null,
-    connectedAt: remoteConnected() ? remoteConnectedAt : null,
-    lastError: remoteLastError,
-  };
-}
-
-function clearRemoteReconnectTimer() {
-  if (remoteReconnectTimer) {
-    clearTimeout(remoteReconnectTimer);
-    remoteReconnectTimer = null;
-  }
-}
-
-function scheduleRemoteReconnect() {
-  if (!remoteConfig || remoteReconnectTimer || remoteConnected()) return;
-  remoteReconnectTimer = setTimeout(() => {
-    remoteReconnectTimer = null;
-    void connectRemoteHub().catch(() => {});
-  }, 3_000);
-}
-
-function closeRemoteHub({ disable = false } = {}) {
-  clearRemoteReconnectTimer();
-  remoteConnectPromise = null;
-  if (disable) remoteConfig = null;
-  if (remoteWs) {
-    const ws = remoteWs;
-    remoteWs = null;
-    try { ws.close(1000, disable ? "disabled" : "reconnect"); } catch { /* ignore */ }
-  }
-  if (disable) {
-    remoteConnectedAt = null;
-    remoteLastError = null;
-  }
-}
-
-async function dispatchRemoteRpc(frame) {
-  const method = String(frame.method || "GET").toUpperCase();
-  const path = String(frame.path || "");
-  if (!frame.id) throw new ApiError(400, "invalid_remote_request", "Remote request id is required");
-  if (!/^\/(api|json)(\/|$)/.test(path)) throw new ApiError(403, "remote_path_forbidden", "Remote requests may only target Browser Relay API paths");
-  if (path.startsWith("/api/remote/")) throw new ApiError(403, "remote_admin_forbidden", "Remote admin endpoints cannot be called through the hub");
-  if (!/^(GET|POST|HEAD)$/.test(method)) throw new ApiError(400, "invalid_remote_request", `Unsupported remote method: ${method}`);
-
-  const headers = { "Content-Type": "application/json" };
-  const options = { method, headers };
-  if (frame.body !== undefined && frame.body !== null && method !== "GET" && method !== "HEAD") {
-    options.body = typeof frame.body === "string" ? frame.body : JSON.stringify(frame.body);
-  }
-
-  let response;
-  try {
-    response = await fetch(`http://127.0.0.1:${RELAY_PORT}${path}`, options);
-  } catch (err) {
-    throw new ApiError(502, "remote_local_relay_unreachable", err instanceof Error ? err.message : String(err), { retryable: true });
-  }
-
-  const text = await response.text();
-  let body = text;
-  try { body = text ? JSON.parse(text) : null; } catch { /* keep raw text */ }
-  return {
-    type: "rpc.response",
-    id: frame.id,
-    status: response.status,
-    headers: { "content-type": response.headers.get("content-type") || "application/json" },
-    body,
-  };
-}
-
-async function handleRemoteHubMessage(raw) {
-  let frame;
-  try { frame = JSON.parse(String(raw)); }
-  catch { return; }
-  if (frame.type !== "rpc.request") return;
-
-  let response;
-  try {
-    response = await dispatchRemoteRpc(frame);
-  } catch (err) {
-    const payload = err instanceof ApiError
-      ? errorPayload(err.code, err.message, { status: err.status, retryable: err.retryable, details: err.details })
-      : errorPayload("remote_request_failed", err instanceof Error ? err.message : String(err), { status: 500 });
-    response = { type: "rpc.response", id: frame.id, status: payload.status || 500, headers: { "content-type": "application/json" }, body: payload };
-  }
-
-  if (remoteWs?.readyState === WebSocket.OPEN) {
-    try { remoteWs.send(JSON.stringify(response)); } catch { /* ignore */ }
-  }
-}
-
-async function connectRemoteHub() {
-  if (!remoteConfig) return false;
-  if (remoteConnected()) return true;
-  if (remoteConnectPromise) return await remoteConnectPromise;
-
-  remoteConnectPromise = new Promise((resolve, reject) => {
-    const wsUrl = `${remoteWsBase(remoteConfig.hub)}/v1/device/connect?routeId=${encodeURIComponent(remoteConfig.routeId)}`;
-    const ws = new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${remoteConfig.secret}` } });
-    remoteWs = ws;
-    let settled = false;
-
-    const settle = (ok, err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (ok) resolve(true);
-      else reject(err);
-    };
-
-    const timer = setTimeout(() => {
-      remoteLastError = "Remote hub connect timeout";
-      settle(false, new Error(remoteLastError));
-      try { ws.close(); } catch { /* ignore */ }
-    }, 5_000);
-
-    ws.on("open", () => {
-      remoteConnectedAt = new Date().toISOString();
-      remoteLastError = null;
-      ws.send(JSON.stringify({
-        type: "device.hello",
-        version: RELAY_VERSION,
-        routeId: remoteConfig.routeId,
-        deviceName: remoteConfig.deviceName || "Browser Relay",
-        capabilities: ["tabs", "snapshot", "click", "type", "screenshot", "console", "network", "downloads"],
-      }));
-      LOG.info("remote.connect", { hub: remoteConfig.hub, routeId: remoteConfig.routeId });
-      settle(true);
-    });
-
-    ws.on("message", (data) => { void handleRemoteHubMessage(data); });
-    ws.on("error", (err) => {
-      remoteLastError = err instanceof Error ? err.message : String(err);
-      if (!settled) settle(false, err instanceof Error ? err : new Error(String(err)));
-    });
-    ws.on("close", (code, reason) => {
-      if (remoteWs === ws) remoteWs = null;
-      remoteConnectedAt = null;
-      if (code !== 1000) remoteLastError = reason ? String(reason) : `Remote hub closed (${code})`;
-      if (!settled) settle(false, new Error(remoteLastError || `Remote hub closed (${code})`));
-      if (remoteConfig) scheduleRemoteReconnect();
-    });
-  }).finally(() => {
-    remoteConnectPromise = null;
-  });
-
-  return await remoteConnectPromise;
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,43 +988,6 @@ async function handleDownloadsClear(_req, res) {
   jsonResponse(res, 200, { ok: true, cleared });
 }
 
-async function handleRemoteStatus(_req, res) {
-  jsonResponse(res, 200, remoteStatusPayload());
-}
-
-async function handleRemoteEnable(req, res) {
-  const body = await readBody(req);
-  const hub = typeof body.hub === "string" ? body.hub.trim().replace(/\/+$/, "") : "";
-  const routeId = typeof body.routeId === "string" ? body.routeId.trim() : "";
-  const secret = typeof body.secret === "string" ? body.secret.trim() : "";
-  if (!hub) return validationError(res, "hub is required", "hub");
-  if (!/^[A-Za-z0-9_-]{16,}$/.test(routeId)) return validationError(res, "routeId must be a high-entropy base64url string", "routeId");
-  if (!/^[A-Za-z0-9_-]{32,}$/.test(secret)) return validationError(res, "secret must be a high-entropy base64url string", "secret");
-
-  const remoteDeviceId = buildRemoteDeviceId(routeId, secret);
-  closeRemoteHub();
-  remoteConfig = {
-    hub,
-    routeId,
-    secret,
-    remoteDeviceId,
-    deviceName: typeof body.deviceName === "string" && body.deviceName.trim() ? body.deviceName.trim() : "Browser Relay",
-  };
-
-  try {
-    await connectRemoteHub();
-  } catch (err) {
-    remoteLastError = err instanceof Error ? err.message : String(err);
-  }
-
-  jsonResponse(res, 200, remoteStatusPayload());
-}
-
-async function handleRemoteDisable(_req, res) {
-  closeRemoteHub({ disable: true });
-  jsonResponse(res, 200, remoteStatusPayload());
-}
-
 // ---------------------------------------------------------------------------
 // HTTP Server
 // ---------------------------------------------------------------------------
@@ -1268,9 +1061,6 @@ const server = createServer(async (req, res) => {
       "POST /api/download/start": handleDownloadStart,
       "GET /api/downloads": handleDownloads,
       "POST /api/downloads/clear": handleDownloadsClear,
-      "GET /api/remote/status": handleRemoteStatus,
-      "POST /api/remote/enable": handleRemoteEnable,
-      "POST /api/remote/disable": handleRemoteDisable,
     };
 
     const routeKey = `${req.method} ${path}`;
