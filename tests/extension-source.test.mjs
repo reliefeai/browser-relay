@@ -16,7 +16,7 @@ test('options remote-relay UI is off by default and exposes toggle/regenerate/co
   const html = readFileSync(new URL('../extension/options.html', import.meta.url), 'utf-8');
   const js = readFileSync(new URL('../extension/options.js', import.meta.url), 'utf-8');
 
-  assert.match(html, /class="lbl is-off" id="remoteState">Off/);
+  assert.match(html, /class="lbl is-off" id="remoteState"/);
   assert.match(html, /id="remoteToggle"/);
   assert.match(html, /id="remoteDetails" class="hidden"/);
   assert.match(html, /id="copyRemoteDeviceId"/);

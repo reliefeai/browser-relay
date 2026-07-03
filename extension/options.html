@@ -74,6 +74,9 @@
     .brand h1 { margin: 0; font-family: var(--mono); font-size: 14px; font-weight: 600; letter-spacing: .28em; text-transform: uppercase; }
     .brand .sub { margin: 1px 0 0; font-family: var(--mono); font-size: 10px; letter-spacing: .2em; color: var(--faint); text-transform: uppercase; }
     .masthead .tag { font-family: var(--mono); font-size: 10px; letter-spacing: .18em; color: var(--faint); text-transform: uppercase; text-align: right; line-height: 1.5; }
+    .masthead-right { display: flex; flex-direction: column; align-items: flex-end; gap: 9px; }
+    .lang-select { font-family: var(--mono); font-size: 11px; letter-spacing: .04em; color: var(--muted); background: var(--inset); border: 1px solid var(--line-strong); border-radius: 8px; padding: 5px 9px; cursor: pointer; }
+    .lang-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
     .panel {
       position: relative; margin-top: 16px;
@@ -182,34 +185,41 @@
         <div class="sigil"><span></span></div>
         <div>
           <h1>Browser Relay</h1>
-          <p class="sub">Control Console</p>
+          <p class="sub" data-i18n="controlConsole">Control Console</p>
         </div>
       </div>
-      <p class="tag">Bridge Chrome to<br>agents · local &amp; remote</p>
+      <div class="masthead-right">
+        <select id="uiLang" class="lang-select" title="Language / 语言">
+          <option value="auto" data-i18n="langAuto">Auto</option>
+          <option value="en">English</option>
+          <option value="zh_CN">中文</option>
+        </select>
+        <p class="tag" data-i18n-html="tagline">Bridge Chrome to<br>agents · local &amp; remote</p>
+      </div>
     </header>
 
     <!-- ================= LOCAL ================= -->
     <section class="panel p1">
       <div class="phead">
         <div>
-          <div class="eyebrow"><span class="idx">01</span><b>Local Relay</b></div>
-          <p class="desc">Bridges your Chrome tabs to the local Browser Relay daemon on <code>127.0.0.1</code> for direct, on-device control. Remote Relay below runs on its own and does not need this.</p>
+          <div class="eyebrow"><span class="idx">01</span><b data-i18n="localRelay">Local Relay</b></div>
+          <p class="desc" data-i18n-html="localDesc">Bridges your Chrome tabs to the local Browser Relay daemon on <code>127.0.0.1</code> for direct, on-device control. Remote Relay below runs on its own and does not need this.</p>
         </div>
       </div>
 
       <div class="row2">
         <div>
-          <label class="field" for="relayPort">Relay port</label>
+          <label class="field" for="relayPort" data-i18n="relayPort">Relay port</label>
           <input type="number" id="relayPort" placeholder="18795" min="1" max="65535">
         </div>
         <div>
-          <label class="field" for="idleDetachSeconds">Idle auto-detach <span class="note">(sec · 0 = never)</span></label>
+          <label class="field" for="idleDetachSeconds" data-i18n-html="idleDetach">Idle auto-detach <span class="note">(sec · 0 = never)</span></label>
           <input type="number" id="idleDetachSeconds" placeholder="600" min="0" max="86400">
         </div>
       </div>
 
       <div class="actions">
-        <button id="save" class="btn-primary">Save &amp; Test Connection</button>
+        <button id="save" class="btn-primary" data-i18n="saveTest">Save &amp; Test Connection</button>
       </div>
       <div id="status" class="status"></div>
     </section>
@@ -218,11 +228,11 @@
     <section class="panel p2">
       <div class="phead">
         <div>
-          <div class="eyebrow"><span class="idx">02</span><b>Remote Relay</b></div>
-          <p class="desc">Control <strong>this</strong> browser from anywhere through the hub — no open ports, no exposed server. Mints a secret Device ID that works until you switch off. Prefer your own hub? <a class="lnk" href="https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub" target="_blank" rel="noopener">Deploy to Cloudflare →</a></p>
+          <div class="eyebrow"><span class="idx">02</span><b data-i18n="remoteRelay">Remote Relay</b></div>
+          <p class="desc" data-i18n-html="remoteDesc">Control <strong>this</strong> browser from anywhere through the hub — no open ports, no exposed server. Mints a secret Device ID that works until you switch off. Prefer your own hub? <a class="lnk" href="https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub" target="_blank" rel="noopener">Deploy to Cloudflare →</a></p>
         </div>
         <div class="switchwrap">
-          <span class="lbl is-off" id="remoteState">Off</span>
+          <span class="lbl is-off" id="remoteState" data-i18n="stateOff">Off</span>
           <label class="switch" title="Turn Remote Relay on or off">
             <input type="checkbox" id="remoteToggle">
             <span class="track"><span class="thumb"></span></span>
@@ -230,30 +240,30 @@
         </div>
       </div>
 
-      <label class="field" for="remoteHost">Remote hub</label>
+      <label class="field" for="remoteHost" data-i18n="remoteHub">Remote hub</label>
       <input type="url" id="remoteHost" placeholder="https://relay.linso.ai">
 
       <div id="remoteDetails" class="hidden">
-        <label class="field" for="remoteDeviceId">Device ID <span class="note">— secret · treat it like a password</span></label>
+        <label class="field" for="remoteDeviceId" data-i18n-html="deviceId">Device ID <span class="note">— secret · treat it like a password</span></label>
         <div class="readout-row">
           <div id="remoteDeviceId" class="device-id" title="Click to copy"></div>
-          <button id="copyRemoteDeviceId" class="btn-ghost copybtn" type="button">Copy</button>
+          <button id="copyRemoteDeviceId" class="btn-ghost copybtn" type="button" data-i18n="copy">Copy</button>
         </div>
 
-        <label class="field">Copy-paste command</label>
+        <label class="field" data-i18n="copyCommand">Copy-paste command</label>
         <div class="readout-row">
           <div id="remoteCommand" class="command" title="Click to copy"></div>
-          <button id="copyRemoteCommand" class="btn-ghost copybtn" type="button">Copy</button>
+          <button id="copyRemoteCommand" class="btn-ghost copybtn" type="button" data-i18n="copy">Copy</button>
         </div>
 
         <div class="actions" id="regenRow">
-          <button id="regenerateDevice" class="btn-warn" type="button">Regenerate Device ID</button>
+          <button id="regenerateDevice" class="btn-warn" type="button" data-i18n="regenerate">Regenerate Device ID</button>
         </div>
         <div id="regenConfirm" class="confirm hidden">
-          <span class="confirm-msg">This invalidates the current Device ID immediately — anything using the old one must switch to the new ID.</span>
+          <span class="confirm-msg" data-i18n="regenWarn">This invalidates the current Device ID immediately — anything using the old one must switch to the new ID.</span>
           <div class="confirm-actions">
-            <button id="regenApply" class="btn-warn" type="button">Regenerate</button>
-            <button id="regenCancel" class="btn-ghost" type="button">Cancel</button>
+            <button id="regenApply" class="btn-warn" type="button" data-i18n="regenConfirm">Regenerate</button>
+            <button id="regenCancel" class="btn-ghost" type="button" data-i18n="cancel">Cancel</button>
           </div>
         </div>
       </div>
@@ -263,16 +273,17 @@
 
     <!-- ================= FOOTER ================= -->
     <div class="foot">
-      <span class="k">Quick start</span>
+      <span class="k" data-i18n="quickStart">Quick start</span>
       <ol>
-        <li>Install the CLI — <code>npm i -g @linsoai/browser-relay</code></li>
-        <li>Check it — <code>browser-relay status</code> (auto-starts on login)</li>
-        <li>Save the Local Relay settings above</li>
-        <li>Flip Remote Relay on, copy the command, run it from anywhere</li>
+        <li data-i18n-html="step1">Install the CLI — <code>npm i -g @linsoai/browser-relay</code></li>
+        <li data-i18n-html="step2">Check it — <code>browser-relay status</code> (auto-starts on login)</li>
+        <li data-i18n="step3">Save the Local Relay settings above</li>
+        <li data-i18n="step4">Flip Remote Relay on, copy the command, run it from anywhere</li>
       </ol>
     </div>
   </main>
 
+  <script src="i18n.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

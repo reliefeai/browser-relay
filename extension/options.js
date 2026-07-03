@@ -2,9 +2,12 @@ const DEFAULT_IDLE_DETACH_SECONDS = 600
 const IDLE_DETACH_DEFAULT_MIGRATION_KEY = 'idleDetachDefaultMigratedTo600'
 const DEFAULT_REMOTE_HOST = 'https://relay.linso.ai'
 
+const t = (key) => window.I18N.t(key)
+
 const els = {
   relayPort: document.getElementById('relayPort'),
   idleDetachSeconds: document.getElementById('idleDetachSeconds'),
+  uiLang: document.getElementById('uiLang'),
   save: document.getElementById('save'),
   status: document.getElementById('status'),
   remoteToggle: document.getElementById('remoteToggle'),
@@ -84,13 +87,13 @@ function renderRemote(config = {}) {
   showRegenConfirm(false)
 
   if (enabled) {
-    setRemoteState('on', 'On')
+    setRemoteState('on', t('stateOn'))
     els.remoteDeviceId.textContent = config.remoteDeviceId
     els.remoteCommand.textContent = commandFor(config.remoteDeviceId, host)
     return
   }
 
-  setRemoteState('off', 'Off')
+  setRemoteState('off', t('stateOff'))
   els.remoteDeviceId.textContent = ''
   els.remoteCommand.textContent = ''
   setStatus(els.remoteStatus, '', '')
@@ -113,12 +116,12 @@ els.save.addEventListener('click', async () => {
   try {
     const res = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(3000) })
     if (res.ok || res.status === 200) {
-      setStatus(els.status, 'ok', 'Connected to relay server. Extension will auto-attach tabs.')
+      setStatus(els.status, 'ok', t('statusConnectedLocal'))
     } else {
-      setStatus(els.status, 'err', `Relay server responded with status ${res.status}. Check if the server is running.`)
+      setStatus(els.status, 'err', `${t('statusRelayStatus')} (${res.status})`)
     }
   } catch (err) {
-    setStatus(els.status, 'err', `Cannot connect to relay at ${url}. Is the server running? (${err.message})`)
+    setStatus(els.status, 'err', `${t('statusRelayUnreachable')} (${err.message})`)
   }
 })
 
@@ -137,20 +140,20 @@ async function enableRemote() {
     remoteDeviceId,
   })
   renderRemote({ remoteControlEnabled: true, remoteHost, remoteDeviceId })
-  setStatus(els.remoteStatus, 'info', 'Connecting the extension to the hub…')
+  setStatus(els.remoteStatus, 'info', t('statusConnectingHub'))
 
   try {
     const data = await chrome.runtime.sendMessage({ type: 'enableRemoteControl', remoteHost, routeId, secret, remoteDeviceId })
     if (data?.connected) {
-      setRemoteState('on', 'On')
-      setStatus(els.remoteStatus, 'ok', 'Remote Relay is on and connected to the hub.')
+      setRemoteState('on', t('stateOn'))
+      setStatus(els.remoteStatus, 'ok', t('statusRemoteConnected'))
     } else {
-      setRemoteState('err', 'On')
-      setStatus(els.remoteStatus, 'err', `Device ID generated, but the hub isn't connected yet: ${data?.lastError || 'unknown error'}`)
+      setRemoteState('err', t('stateOn'))
+      setStatus(els.remoteStatus, 'err', t('statusRemoteNoHub') + (data?.lastError || 'unknown error'))
     }
   } catch (err) {
-    setRemoteState('err', 'On')
-    setStatus(els.remoteStatus, 'err', `Device ID generated, but the extension didn't reach the hub: ${err.message}`)
+    setRemoteState('err', t('stateOn'))
+    setStatus(els.remoteStatus, 'err', t('statusRemoteNoReach') + err.message)
   }
 }
 
@@ -164,7 +167,7 @@ async function disableRemote() {
   await chrome.storage.local.remove(['remoteRouteId', 'remoteSecret', 'remoteDeviceId'])
   await chrome.storage.local.set({ remoteControlEnabled: false })
   renderRemote({ remoteControlEnabled: false, remoteHost: stored.remoteHost || DEFAULT_REMOTE_HOST })
-  setStatus(els.remoteStatus, 'info', 'Remote Relay is off. Flip it on to generate a new Device ID.')
+  setStatus(els.remoteStatus, 'info', t('statusRemoteOff'))
 }
 
 els.remoteToggle.addEventListener('change', async () => {
@@ -195,9 +198,10 @@ els.regenApply.addEventListener('click', async () => {
   }
 })
 
-function flashButton(button, text = 'Copied') {
+function flashButton(button, text) {
+  const label = text || t('copied')
   const original = button.textContent
-  button.textContent = text
+  button.textContent = label
   setTimeout(() => { button.textContent = original }, 1200)
 }
 
@@ -213,25 +217,33 @@ els.remoteDeviceId.addEventListener('click', () => copyText(els.remoteDeviceId.t
 els.remoteCommand.addEventListener('click', () => copyText(els.remoteCommand.textContent.trim(), els.copyRemoteCommand))
 els.copyRemoteCommand.addEventListener('click', () => copyText(els.remoteCommand.textContent.trim(), els.copyRemoteCommand))
 
-chrome.storage.local.get([
-  'relayPort',
-  'idleDetachSeconds',
-  IDLE_DETACH_DEFAULT_MIGRATION_KEY,
-  'remoteControlEnabled',
-  'remoteHost',
-  'remoteDeviceId',
-], async (result) => {
+els.uiLang.addEventListener('change', async () => {
+  await chrome.storage.local.set({ uiLang: els.uiLang.value })
+  await initFromStorage()
+})
+
+async function initFromStorage() {
+  const result = await chrome.storage.local.get([
+    'relayPort',
+    'idleDetachSeconds',
+    IDLE_DETACH_DEFAULT_MIGRATION_KEY,
+    'remoteControlEnabled',
+    'remoteHost',
+    'remoteDeviceId',
+    'uiLang',
+  ])
+
+  window.I18N.setLang(result.uiLang || 'auto')
+  els.uiLang.value = result.uiLang || 'auto'
+  window.I18N.apply()
+
   if (result.relayPort) els.relayPort.value = result.relayPort
 
   let idleDetachSeconds = result.idleDetachSeconds
   if (Number.parseInt(String(idleDetachSeconds), 10) === 30 && !result[IDLE_DETACH_DEFAULT_MIGRATION_KEY]) {
     idleDetachSeconds = DEFAULT_IDLE_DETACH_SECONDS
-    await chrome.storage.local.set({
-      idleDetachSeconds,
-      [IDLE_DETACH_DEFAULT_MIGRATION_KEY]: true,
-    })
+    await chrome.storage.local.set({ idleDetachSeconds, [IDLE_DETACH_DEFAULT_MIGRATION_KEY]: true })
   }
-
   if (result.idleDetachSeconds !== undefined && result.idleDetachSeconds !== null) {
     els.idleDetachSeconds.value = idleDetachSeconds
   }
@@ -246,10 +258,12 @@ chrome.storage.local.get([
 
   try {
     const data = await chrome.runtime.sendMessage({ type: 'getRemoteControlStatus' })
-    setRemoteState(data?.connected ? 'on' : 'err', 'On')
-    setStatus(els.remoteStatus, data?.connected ? 'ok' : 'err', data?.connected ? 'Remote Relay is on and connected.' : `Remote Relay is on but disconnected: ${data?.lastError || 'not connected'}`)
+    setRemoteState(data?.connected ? 'on' : 'err', t('stateOn'))
+    setStatus(els.remoteStatus, data?.connected ? 'ok' : 'err', data?.connected ? t('statusRemoteConnectedShort') : t('statusRemoteDisconnected') + (data?.lastError || 'not connected'))
   } catch {
-    setRemoteState('err', 'On')
-    setStatus(els.remoteStatus, 'err', 'Remote Relay is on, but the extension background is not responding yet.')
+    setRemoteState('err', t('stateOn'))
+    setStatus(els.remoteStatus, 'err', t('statusRemoteBgOffline'))
   }
-})
+}
+
+initFromStorage()
