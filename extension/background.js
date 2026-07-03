@@ -456,6 +456,9 @@ async function attachTab(tabId, opts = {}) {
 
   tabs.set(tabId, { state: 'connected', sessionId, targetId, attachOrder: sid, idle: false, lastActivity: Date.now() })
   tabBySession.set(sessionId, tabId)
+  // Fresh attach resets CDP domains — re-enable console/network capture on demand.
+  consoleCaptureTabs.delete(tabId)
+  networkCaptureTabs.delete(tabId)
   void chrome.action.setTitle({ tabId, title: 'Browser Relay: attached (click to detach)' })
 
   if (!opts.skipAttachedEvent) {
@@ -692,6 +695,9 @@ function onDebuggerEvent(source, method, params) {
   if (method === 'Target.detachedFromTarget' && params?.sessionId) {
     childSessionToTab.delete(String(params.sessionId))
   }
+
+  // Buffer console/network events for remote /api/console and /api/network.
+  captureCdpEvent(tabId, method, params)
 
   try {
     sendToRelay({ method: 'forwardCDPEvent', params: { sessionId: source.sessionId || tab.sessionId, method, params } })
@@ -956,7 +962,7 @@ async function ensureRemoteHubConnection() {
       version: chrome.runtime.getManifest().version,
       routeId: cfg.remoteRouteId,
       deviceName: 'Browser Relay',
-      capabilities: ['tabs', 'eval', 'snapshot', 'click', 'type', 'key', 'scroll', 'navigate', 'screenshot'],
+      capabilities: ['tabs', 'eval', 'snapshot', 'click', 'type', 'key', 'scroll', 'navigate', 'screenshot', 'console', 'network'],
     }))
 
     ws.onclose = () => { if (ws !== remoteWs) return; onRemoteHubClosed('closed') }
@@ -1079,6 +1085,10 @@ async function executeRemoteApi(method, path, body) {
   if (method === 'POST' && p === '/api/scroll') return { status: 200, body: await apiScroll(payload) }
   if (method === 'GET' && p === '/api/snapshot') return { status: 200, body: await apiSnapshot(payload, u.searchParams) }
   if ((method === 'GET' || method === 'POST') && p === '/api/screenshot') return { status: 200, body: await apiScreenshot(payload, u.searchParams) }
+  if (method === 'GET' && p === '/api/console') return { status: 200, body: await apiConsole(payload, u.searchParams) }
+  if (method === 'POST' && p === '/api/console/clear') return { status: 200, body: await apiConsoleClear(payload) }
+  if (method === 'GET' && p === '/api/network') return { status: 200, body: await apiNetwork(payload, u.searchParams) }
+  if (method === 'POST' && p === '/api/network/clear') return { status: 200, body: await apiNetworkClear(payload) }
 
   return apiError('unknown_endpoint', `Unknown or not-yet-supported remote endpoint: ${method} ${p}`, 404)
 }
@@ -1297,6 +1307,187 @@ async function apiScreenshot(body, searchParams) {
   const r = await remoteCdp(tabId, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
   const data = r?.data || ''
   return { ok: true, data, format: 'png', fullPage: false, strategy: 'viewport', bytes: base64Bytes(data) }
+}
+
+// ---- Remote console / network capture ----
+// Buffer CDP Log/Runtime/Network events per attached tab (in memory, capped) so
+// remote /api/console and /api/network can serve them, like the local daemon does.
+const MAX_CONSOLE_ENTRIES = 1000
+const MAX_NETWORK_ENTRIES = 1000
+const SENSITIVE_NETWORK_HEADERS = new Set(['authorization', 'cookie', 'proxy-authorization', 'set-cookie'])
+let consoleEntries = []
+let networkEntries = []
+let nextConsoleEntryId = 1
+let nextNetworkEntryId = 1
+const consoleCaptureTabs = new Set()
+const networkCaptureTabs = new Set()
+
+function boundInt(value, dflt, min, max) {
+  const n = parseInt(String(value ?? ''), 10)
+  if (!Number.isFinite(n)) return dflt
+  return Math.max(min, Math.min(max, n))
+}
+
+function remoteObjectValue(obj) {
+  if (!obj || typeof obj !== 'object') return ''
+  if ('value' in obj) return obj.value
+  if ('unserializableValue' in obj) return obj.unserializableValue
+  return obj.description || obj.type || ''
+}
+
+function stringifyConsoleValue(value) {
+  if (typeof value === 'string') return value
+  if (value === undefined) return 'undefined'
+  try { return JSON.stringify(value) } catch { return String(value) }
+}
+
+function redactNetworkHeaders(headers = {}) {
+  const redacted = {}
+  if (!headers || typeof headers !== 'object') return redacted
+  for (const [name, value] of Object.entries(headers)) {
+    redacted[name] = SENSITIVE_NETWORK_HEADERS.has(String(name).toLowerCase()) ? '[redacted]' : value
+  }
+  return redacted
+}
+
+function appendConsoleEntry(entry) {
+  consoleEntries.push({ id: nextConsoleEntryId++, receivedAt: new Date().toISOString(), ...entry })
+  if (consoleEntries.length > MAX_CONSOLE_ENTRIES) consoleEntries = consoleEntries.slice(-MAX_CONSOLE_ENTRIES)
+}
+
+function appendNetworkEntry(entry) {
+  networkEntries.push({ id: nextNetworkEntryId++, receivedAt: new Date().toISOString(), ...entry })
+  if (networkEntries.length > MAX_NETWORK_ENTRIES) networkEntries = networkEntries.slice(-MAX_NETWORK_ENTRIES)
+}
+
+// Called from onDebuggerEvent for every attached tab; tabId is the chrome tab id.
+function captureCdpEvent(tabId, method, params = {}) {
+  const base = { tabId: String(tabId) }
+
+  if (method === 'Runtime.consoleAPICalled') {
+    const args = (params.args || []).map(remoteObjectValue)
+    return appendConsoleEntry({ ...base, source: 'runtime', level: params.type || 'log', text: args.map(stringifyConsoleValue).join(' '), args, stackTrace: params.stackTrace || null, timestamp: params.timestamp || null })
+  }
+  if (method === 'Runtime.exceptionThrown') {
+    const details = params.exceptionDetails || {}
+    return appendConsoleEntry({ ...base, source: 'runtime', level: 'error', text: details.exception?.description || details.text || 'Uncaught exception', exceptionDetails: details, timestamp: params.timestamp || null })
+  }
+  if (method === 'Log.entryAdded') {
+    const entry = params.entry || {}
+    return appendConsoleEntry({ ...base, source: entry.source || 'log', level: entry.level || 'info', text: entry.text || '', lineNumber: entry.lineNumber, url: entry.url || '', networkRequestId: entry.networkRequestId, timestamp: entry.timestamp || null })
+  }
+
+  if (method === 'Network.requestWillBeSent') {
+    const request = params.request || {}
+    return appendNetworkEntry({ ...base, requestId: params.requestId || '', type: 'request', url: request.url || params.documentURL || '', method: request.method || '', documentURL: params.documentURL || '', frameId: params.frameId || '', resourceType: params.type || '', wallTime: params.wallTime ?? null, timestamp: params.timestamp ?? null, initiator: params.initiator || null, request: { url: request.url || '', method: request.method || '', headers: redactNetworkHeaders(request.headers) } })
+  }
+  if (method === 'Network.responseReceived') {
+    const response = params.response || {}
+    return appendNetworkEntry({ ...base, requestId: params.requestId || '', type: 'response', url: response.url || '', status: response.status ?? null, statusText: response.statusText || '', mimeType: response.mimeType || '', protocol: response.protocol || '', resourceType: params.type || '', timestamp: params.timestamp ?? null, response: { url: response.url || '', status: response.status ?? null, statusText: response.statusText || '', headers: redactNetworkHeaders(response.headers), mimeType: response.mimeType || '' } })
+  }
+  if (method === 'Network.loadingFinished') {
+    return appendNetworkEntry({ ...base, requestId: params.requestId || '', type: 'finished', encodedDataLength: params.encodedDataLength ?? null, timestamp: params.timestamp ?? null })
+  }
+  if (method === 'Network.loadingFailed') {
+    return appendNetworkEntry({ ...base, requestId: params.requestId || '', type: 'failed', resourceType: params.type || '', errorText: params.errorText || '', canceled: !!params.canceled, blockedReason: params.blockedReason || '', timestamp: params.timestamp ?? null })
+  }
+}
+
+async function ensureConsoleCapture(tabId) {
+  if (consoleCaptureTabs.has(tabId)) return
+  await ensureRemoteAttached(tabId)
+  await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable').catch(() => {})
+  await chrome.debugger.sendCommand({ tabId }, 'Log.enable').catch(() => {})
+  consoleCaptureTabs.add(tabId)
+}
+
+async function ensureNetworkCapture(tabId) {
+  if (networkCaptureTabs.has(tabId)) return
+  await ensureRemoteAttached(tabId)
+  await chrome.debugger.sendCommand({ tabId }, 'Network.enable').catch(() => {})
+  networkCaptureTabs.add(tabId)
+}
+
+function attachedTabIds() {
+  const ids = []
+  for (const [id, tab] of tabs.entries()) if (tab.state === 'connected') ids.push(id)
+  return ids
+}
+
+async function apiConsole(body, params) {
+  const tabIdParam = body.tabId ?? params.get('tabId')
+  const level = body.level ?? params.get('level')
+  const limit = boundInt(body.limit ?? params.get('limit'), 100, 0, MAX_CONSOLE_ENTRIES)
+  const clear = String(body.clear ?? params.get('clear')) === 'true'
+
+  if (tabIdParam !== undefined && tabIdParam !== null && tabIdParam !== '') {
+    await ensureConsoleCapture(await resolveRemoteTabId(tabIdParam)).catch(() => {})
+  } else {
+    await Promise.all(attachedTabIds().map((id) => ensureConsoleCapture(id).catch(() => {})))
+  }
+
+  let entries = consoleEntries
+  if (tabIdParam) entries = entries.filter((e) => String(e.tabId) === String(tabIdParam))
+  if (level) entries = entries.filter((e) => e.level === level)
+  const total = entries.length
+  const selected = limit === 0 ? [] : entries.slice(-limit)
+  if (clear) { const ids = new Set(selected.map((e) => e.id)); consoleEntries = consoleEntries.filter((e) => !ids.has(e.id)) }
+  return { ok: true, entries: selected, count: selected.length, total, storedTotal: consoleEntries.length }
+}
+
+async function apiConsoleClear(body) {
+  const before = consoleEntries.length
+  const { tabId, level } = body
+  consoleEntries = consoleEntries.filter((e) => {
+    if (tabId && String(e.tabId) !== String(tabId)) return true
+    if (level && e.level !== level) return true
+    return false
+  })
+  return { ok: true, cleared: before - consoleEntries.length, total: consoleEntries.length }
+}
+
+function filterNetwork(entries, f) {
+  let out = entries
+  if (f.tabId) out = out.filter((e) => String(e.tabId) === String(f.tabId))
+  if (f.type) out = out.filter((e) => e.type === f.type)
+  if (f.method) out = out.filter((e) => String(e.method || e.request?.method || '').toUpperCase() === String(f.method).toUpperCase())
+  if (f.status) out = out.filter((e) => Number(e.status ?? e.response?.status) === Number(f.status))
+  if (f.requestId) out = out.filter((e) => e.requestId === f.requestId)
+  if (f.url) out = out.filter((e) => String(e.url || e.request?.url || e.response?.url || '').includes(f.url))
+  return out
+}
+
+async function apiNetwork(body, params) {
+  const f = {
+    tabId: body.tabId ?? params.get('tabId') ?? undefined,
+    type: body.type ?? params.get('type') ?? undefined,
+    method: body.method ?? params.get('method') ?? undefined,
+    status: body.status ?? params.get('status') ?? undefined,
+    requestId: body.requestId ?? params.get('requestId') ?? undefined,
+    url: body.url ?? params.get('url') ?? undefined,
+  }
+  const limit = boundInt(body.limit ?? params.get('limit'), 100, 0, MAX_NETWORK_ENTRIES)
+  const clear = String(body.clear ?? params.get('clear')) === 'true'
+
+  if (f.tabId) await ensureNetworkCapture(await resolveRemoteTabId(f.tabId)).catch(() => {})
+  else await Promise.all(attachedTabIds().map((id) => ensureNetworkCapture(id).catch(() => {})))
+
+  const matched = filterNetwork(networkEntries, f)
+  const selected = limit === 0 ? [] : matched.slice(-limit)
+  if (clear) { const ids = new Set(selected.map((e) => e.id)); networkEntries = networkEntries.filter((e) => !ids.has(e.id)) }
+  return { ok: true, entries: selected, count: selected.length, total: matched.length, storedTotal: networkEntries.length }
+}
+
+async function apiNetworkClear(body) {
+  const before = networkEntries.length
+  const f = { tabId: body.tabId, type: body.type, method: body.method, status: body.status, requestId: body.requestId, url: body.url }
+  if (Object.values(f).some((v) => v !== undefined && v !== null && v !== '')) {
+    const ids = new Set(filterNetwork(networkEntries, f).map((e) => e.id))
+    networkEntries = networkEntries.filter((e) => !ids.has(e.id))
+  } else {
+    networkEntries = []
+  }
+  return { ok: true, cleared: before - networkEntries.length, total: networkEntries.length }
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
