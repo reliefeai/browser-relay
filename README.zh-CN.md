@@ -140,9 +140,14 @@ browser-relay remote add mymac br-xxxx
 browser-relay tabs --remote mymac
 ```
 
-**自建你自己的 Relay 服务** —— 一键部署到 Cloudflare,然后把 Options 页面的 *公网 Relay 服务* 填成你的 Worker 地址:
+**自建你自己的 Relay 服务** —— 它就是 `hub/` 里一个小的 Cloudflare Worker:
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub)
+```bash
+git clone https://github.com/reliefeai/browser-relay
+cd browser-relay/hub && npx wrangler deploy
+```
+
+然后把 Options 页面的 *公网 Relay 服务* 填成打印出来的 `…workers.dev` 地址。(`hub/README.md` 里也有一键 **Deploy to Cloudflare** 按钮,但它需要 Cloudflare 的 GitHub 集成;`wrangler deploy` 一定能用。)
 
 `remote-device-id` 是一个 capability —— Remote Relay 开着时,拿到它的人就能控制这个浏览器。设计见 `docs/remote-control-hub.md`。
 

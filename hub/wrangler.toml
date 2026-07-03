@@ -3,9 +3,10 @@ main = "src/worker.js"
 compatibility_date = "2025-12-01"
 workers_dev = true
 
-routes = [
-  { pattern = "relay.linso.ai", custom_domain = true }
-]
+# Self-hosters: `wrangler deploy` publishes this to
+# https://browser-relay-hub.<your-subdomain>.workers.dev — use that URL as the
+# extension's "Public relay". To put it on your own domain, add a route, e.g.:
+#   routes = [{ pattern = "relay.example.com", custom_domain = true }]
 
 [durable_objects]
 bindings = [

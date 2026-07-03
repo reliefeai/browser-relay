@@ -154,9 +154,14 @@ browser-relay remote add mymac br-xxxx
 browser-relay tabs --remote mymac
 ```
 
-**Run your own relay** instead of the hosted one — deploy it to Cloudflare in one click, then set the Options page's *Public relay* field to your Worker URL:
+**Run your own relay** instead of the hosted one — it's a small Cloudflare Worker in `hub/`:
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub)
+```bash
+git clone https://github.com/reliefeai/browser-relay
+cd browser-relay/hub && npx wrangler deploy
+```
+
+Then set the Options page's *Public relay* field to the printed `…workers.dev` URL. (A one-click **Deploy to Cloudflare** button is in `hub/README.md`, but it needs Cloudflare's GitHub integration; `wrangler deploy` always works.)
 
 The `remote-device-id` is a capability — anyone with it can control this browser while Remote Relay is on. Design notes: `docs/remote-control-hub.md`.
 
