@@ -259,6 +259,32 @@ curl -X POST http://127.0.0.1:18795/api/click \
 
 Chrome 扩展端口可以在扩展 Options 页面修改。
 
+### 隐藏「已开始调试此浏览器」顶部提示
+
+只要扩展附加了 debugger,Chrome 就会在页面顶部强制显示一条
+`"Browser Relay" 已开始调试此浏览器` 的提示条。任何扩展 API 都无法去掉它 ——
+这是 Chrome 内置的防滥用安全提示。
+
+两种处理方式:
+
+- **自动(默认):** 扩展会在标签页闲置 10 分钟后 soft-detach,提示条在你不用时
+  自动消失,下一次命令再自动 re-attach。无需配置。
+- **彻底去掉:** 用 `--silent-debugger-extension-api` 参数启动 Chrome,它会抑制
+  debugger 扩展 API 的这条提示。必须先完全退出 Chrome(`open --args` 只在冷启动时
+  才会传入参数):
+
+  ```bash
+  # macOS
+  osascript -e 'quit app "Google Chrome"'
+  open -a "Google Chrome" --args --silent-debugger-extension-api
+  ```
+
+  想长期生效,就始终这样启动 Chrome(比如做个 shell 别名或 `.command` 启动器)——
+  直接点 Dock 图标不会带上这个参数。
+
+  代价:这会削弱一层安全防护 —— 之后**任何**拥有 `debugger` 权限的扩展都能静默
+  附加而不再提示。个人自用、清楚它关掉了什么的前提下可以接受。
+
 ## 本地开发
 
 ```bash

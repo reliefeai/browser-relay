@@ -290,6 +290,34 @@ Linux: ~/.config/systemd/user/browser-relay.service
 
 Logs: `/tmp/browser-relay.log`, `/tmp/browser-relay.error.log`
 
+### Hiding the "debugging this browser" infobar
+
+Whenever the extension has a debugger attached, Chrome shows a mandatory
+`"Browser Relay" started debugging this browser` bar at the top of the page.
+No extension API can remove it — it is Chrome's built-in anti-abuse warning.
+
+Two ways to deal with it:
+
+- **Automatic (default):** the extension soft-detaches idle tabs after 10 min, so
+  the bar disappears on its own while you're not using it and re-attaches on the
+  next command. Nothing to configure.
+- **Remove it entirely:** launch Chrome with the `--silent-debugger-extension-api`
+  flag, which suppresses the bar for the debugger extension API. You must fully
+  quit Chrome first (`open --args` only passes flags to a cold start):
+
+  ```bash
+  # macOS
+  osascript -e 'quit app "Google Chrome"'
+  open -a "Google Chrome" --args --silent-debugger-extension-api
+  ```
+
+  To make it stick, always launch Chrome this way (e.g. a shell alias or a
+  `.command` launcher) — a normal Dock click won't carry the flag.
+
+  Trade-off: this weakens a security protection — *any* extension with the
+  `debugger` permission can then silently attach without warning. Fine for
+  personal use as long as you understand what it disables.
+
 ## Development
 
 ```bash
