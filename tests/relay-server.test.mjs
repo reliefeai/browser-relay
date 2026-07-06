@@ -212,6 +212,59 @@ test('network events are captured, filterable, clearable, and redact sensitive h
   assert.equal(afterClear.body.storedTotal, 0);
 });
 
+test('navigate with no attached tabs opens a fresh tab and navigates it', async (t) => {
+  const relay = await startRelay(t);
+  let ext;
+  ext = await connectFakeExtension(t, relay.port, async (cmd) => {
+    if (cmd.method === 'Target.createTarget') {
+      // Mirror the extension: attach + announce the new page before returning
+      // its id, so the relay can resolve a session for the follow-up navigate.
+      ext.announceTab({ sessionId: 'session-new', targetId: 'target-new', url: 'about:blank' });
+      return { targetId: 'target-new' };
+    }
+    if (cmd.method === 'Page.navigate') return { frameId: 'frame-1' };
+    if (cmd.method === 'Runtime.evaluate') {
+      if (cmd.params?.expression === 'document.title') return { result: { value: 'Loaded' } };
+      if (cmd.params?.expression === 'location.href') return { result: { value: 'https://example.test/page' } };
+    }
+    return {};
+  });
+
+  // No tab announced beforehand → zero attached tabs at the time of the request.
+  const { status, body } = await fetchJson(relay.port, '/api/navigate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: 'https://example.test/page' }),
+  });
+
+  assert.equal(status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.url, 'https://example.test/page');
+  assert.equal(body.title, 'Loaded');
+
+  const createCmd = ext.commands.find((c) => c.method === 'Target.createTarget');
+  assert.ok(createCmd, 'relay should create a tab when none is attached');
+  assert.equal(createCmd.params.url, 'about:blank');
+  const navCmd = ext.commands.find((c) => c.method === 'Page.navigate');
+  assert.equal(navCmd.params.url, 'https://example.test/page');
+});
+
+test('navigate targeting an unknown tab still fails instead of creating one', async (t) => {
+  const relay = await startRelay(t);
+  const ext = await connectFakeExtension(t, relay.port);
+
+  const { status, body } = await fetchJson(relay.port, '/api/navigate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: 'https://example.test/page', tabId: 'does-not-exist' }),
+  });
+
+  assert.equal(status, 404);
+  assert.equal(body.ok, false);
+  assert.equal(body.code, 'tab_not_found');
+  assert.ok(!ext.commands.some((c) => c.method === 'Target.createTarget'));
+});
+
 test('unknown API endpoint returns a structured endpoint_not_found error', async (t) => {
   const relay = await startRelay(t);
 

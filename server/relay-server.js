@@ -743,7 +743,19 @@ async function handleNavigate(req, res) {
   const url = body.url;
   if (!url || typeof url !== "string") return validationError(res, "url is required", "url");
   await ensureExtension();
-  const sessionId = resolveTab(body.tabId);
+  let sessionId;
+  try {
+    sessionId = resolveTab(body.tabId);
+  } catch (err) {
+    // Cold start: nothing is attached to navigate. When the caller didn't target
+    // a specific tab, open a fresh blank tab and navigate that instead of failing.
+    if (err instanceof ApiError && err.code === "no_attached_tabs" && !body.tabId) {
+      const created = await sendToExtension("Target.createTarget", { url: "about:blank" });
+      sessionId = resolveSession(created?.targetId);
+    } else {
+      throw err;
+    }
+  }
   const result = await sendToExtension("Page.navigate", { url }, sessionId);
   await new Promise((r) => setTimeout(r, 500));
   let title = "", finalUrl = url;

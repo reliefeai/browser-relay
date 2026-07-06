@@ -626,6 +626,19 @@ async function handleForwardCdpCommand(msg) {
 
   const bySession = sessionId ? getTabBySessionId(sessionId) : null
   const targetId = typeof params?.targetId === 'string' ? params.targetId : undefined
+
+  // Target.createTarget spins up its own fresh tab, so it needs no existing
+  // attached tab. Handle it before the guard below so it works from a cold start
+  // (zero attached tabs) — otherwise the relay could never open the first tab.
+  if (method === 'Target.createTarget') {
+    const url = typeof params?.url === 'string' ? params.url : 'about:blank'
+    const tab = await chrome.tabs.create({ url, active: false })
+    if (!tab.id) throw new Error('Failed to create tab')
+    await new Promise((r) => setTimeout(r, 100))
+    const attached = await attachTab(tab.id)
+    return { targetId: attached.targetId }
+  }
+
   const tabId = bySession?.tabId || (targetId ? getTabByTargetId(targetId) : null) || (() => { for (const [id, tab] of tabs.entries()) { if (tab.state === 'connected') return id } return null })()
 
   if (!tabId) throw new Error(`No attached tab for method ${method}`)
@@ -635,9 +648,9 @@ async function handleForwardCdpCommand(msg) {
     activeTab.lastActivity = Date.now()
     if (activeTab.state === 'connected') markTabActivity(tabId)
   }
-  // createTarget spins up its own fresh tab; closeTarget/activateTarget use the
-  // tabs API and need no debugger — everything else must wake an idle tab first.
-  const noDebuggerMethods = method === 'Target.createTarget' || method === 'Target.closeTarget' || method === 'Target.activateTarget'
+  // closeTarget/activateTarget use the tabs API and need no debugger — everything
+  // else must wake an idle tab first.
+  const noDebuggerMethods = method === 'Target.closeTarget' || method === 'Target.activateTarget'
   if (activeTab?.idle && !noDebuggerMethods) {
     await wakeTab(tabId)
   }
@@ -647,15 +660,6 @@ async function handleForwardCdpCommand(msg) {
   if (method === 'Runtime.enable') {
     try { await chrome.debugger.sendCommand(debuggee, 'Runtime.disable'); await new Promise((r) => setTimeout(r, 50)) } catch { /* ignore */ }
     return await chrome.debugger.sendCommand(debuggee, 'Runtime.enable', params)
-  }
-
-  if (method === 'Target.createTarget') {
-    const url = typeof params?.url === 'string' ? params.url : 'about:blank'
-    const tab = await chrome.tabs.create({ url, active: false })
-    if (!tab.id) throw new Error('Failed to create tab')
-    await new Promise((r) => setTimeout(r, 100))
-    const attached = await attachTab(tab.id)
-    return { targetId: attached.targetId }
   }
 
   if (method === 'Target.closeTarget') {
