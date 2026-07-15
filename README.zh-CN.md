@@ -65,7 +65,7 @@ Browser Relay 补的就是这一层(也是很多人在找的 OpenClaw Browser Re
 
 ## 快速开始
 
-使用分三步。
+使用分四步。需要桌面版 Chrome 和 Node.js/npm。macOS、Linux 会自动安装用户级后台服务；Windows 原生后台服务支持落地前，请在终端里保持 `browser-relay` 运行。
 
 ### 1. 安装
 
@@ -88,7 +88,24 @@ browser-relay path
 
 升级用 `browser-relay update`:它会全局安装 `@linsoai/browser-relay@latest`、刷新后台服务并输出状态检查;扩展会在下次重连(约 30 秒内)自动重载。
 
-### 3. 安装 Agent Skill
+### 3. 验证浏览器连接
+
+安装 Skill 前先执行两项检查：
+
+```bash
+browser-relay status
+browser-relay tabs
+```
+
+`status` 应显示 `HTTP: responding`；`tabs` 应至少输出一条标签页 ID、标题和 URL：
+
+```text
+ABC123    Example Domain    https://example.com/
+```
+
+如果没有标签页，先重新加载 unpacked 扩展，再执行 `browser-relay fix`，然后重试 `browser-relay tabs`。扩展仍未连接时，用 `browser-relay logs` 查看日志。
+
+### 4. 安装 Agent Skill 并完成第一个任务
 
 Browser Relay 自带 Agent Skill:
 
@@ -97,6 +114,14 @@ browser-relay skill
 ```
 
 命令会输出一条 `npx skills ...` 安装命令,按提示安装到对应 Agent;也可以直接执行 `$(browser-relay skill)`。安装后就能让 Agent 操作你自己的浏览器,而不用另开自动化浏览器。
+
+第一次先给 Agent 一个只读的小任务：
+
+```text
+使用 Browser Relay 告诉我当前 Chrome 标签页的标题和 URL，不要导航。
+```
+
+Agent 能正确回答，就证明整条链路已经打通：Agent Skill → CLI → relay → 扩展 → 你正在使用的 Chrome 标签页。
 
 ## Agent 友好
 

@@ -68,7 +68,7 @@ Remote (Remote Relay)
 
 ## Quick Start
 
-Use Browser Relay in three steps.
+Use Browser Relay in four steps. You need desktop Chrome plus Node.js/npm. On macOS and Linux, the package installs a user service automatically; on Windows, run `browser-relay` in a terminal until native service support lands.
 
 ### 1. Install
 
@@ -97,7 +97,24 @@ Then open `chrome://extensions`, enable **Developer mode**, click **Load unpacke
 
 Upgrade with `browser-relay update`. It installs `@linsoai/browser-relay@latest` globally, refreshes the background service, and prints a status check; the extension reloads itself the next time it reconnects (within ~30 seconds).
 
-### 3. Install the Agent Skill
+### 3. Verify the browser connection
+
+Run both checks before installing the Skill:
+
+```bash
+browser-relay status
+browser-relay tabs
+```
+
+`status` should report `HTTP: responding`. `tabs` should print at least one tab ID, title, and URL:
+
+```text
+ABC123    Example Domain    https://example.com/
+```
+
+If no tabs appear, reload the unpacked extension, then run `browser-relay fix` and retry `browser-relay tabs`. Use `browser-relay logs` if the extension still does not reconnect.
+
+### 4. Install the Agent Skill and run the first task
 
 Browser Relay ships with an agent-friendly Skill. Print the install command:
 
@@ -106,6 +123,14 @@ browser-relay skill
 ```
 
 Then run the printed `npx skills ...` command and choose the agent to install it into, or run it directly with `$(browser-relay skill)`. After that, your agent can operate your own browser without opening a separate automation browser.
+
+Give the agent a small read-only task first:
+
+```text
+Use Browser Relay to tell me the title and URL of my current Chrome tab. Do not navigate.
+```
+
+The first successful response proves the full path works: Agent Skill → CLI → relay → extension → your existing Chrome tab.
 
 ## Agent Friendly by Default
 
