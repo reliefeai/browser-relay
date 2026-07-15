@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Relay · Workflow demo</title>
+  <style>
+    :root {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #eef5ff;
+      background: #081323;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 1280px; min-height: 720px; background: #081323; }
+    .frame {
+      position: relative;
+      width: 1280px;
+      height: 720px;
+      margin: 0 auto;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 12% 10%, rgb(56 129 246 / 25%), transparent 28%),
+        radial-gradient(circle at 88% 80%, rgb(98 230 167 / 18%), transparent 30%),
+        #091729;
+    }
+    .topbar { display: flex; align-items: center; justify-content: space-between; padding: 28px 42px 18px; }
+    .brand { display: flex; gap: 12px; align-items: center; font-size: 20px; font-weight: 780; }
+    .brand-mark { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 11px; background: #62e6a7; color: #0b2034; }
+    .disclosure { padding: 8px 12px; border: 1px solid #36506e; border-radius: 999px; color: #aebed4; font-size: 13px; }
+    .stage { display: grid; grid-template-columns: 300px 1fr; gap: 26px; padding: 4px 42px 34px; }
+    .phone { height: 570px; padding: 11px; border: 1px solid #425c7d; border-radius: 34px; background: #050b14; box-shadow: 0 22px 70px rgb(0 0 0 / 35%); }
+    .phone-screen { position: relative; height: 100%; overflow: hidden; border-radius: 25px; background: #f5f7fb; color: #17243b; }
+    .phone-head { padding: 18px; border-bottom: 1px solid #dfe5ef; background: white; font-weight: 760; text-align: center; }
+    .messages { display: grid; gap: 12px; align-content: start; padding: 20px 16px; }
+    .bubble { max-width: 90%; padding: 12px 14px; border-radius: 16px; font-size: 14px; line-height: 1.4; opacity: 0; transform: translateY(8px); }
+    .bubble.user { justify-self: end; border-bottom-right-radius: 5px; background: #2457e6; color: white; }
+    .bubble.agent { border-bottom-left-radius: 5px; background: white; box-shadow: 0 4px 16px rgb(30 50 80 / 12%); }
+    .device-note { position: absolute; right: 14px; bottom: 14px; left: 14px; color: #77849a; font-size: 11px; text-align: center; }
+    .workspace { display: grid; grid-template-rows: 1fr 184px; gap: 16px; height: 570px; }
+    .browser { position: relative; overflow: hidden; border: 1px solid #3a516f; border-radius: 17px; background: #f3f6fb; color: #14213d; box-shadow: 0 22px 70px rgb(0 0 0 / 28%); }
+    .browser-chrome { display: flex; gap: 8px; align-items: center; height: 38px; padding: 0 14px; background: #e8edf5; }
+    .traffic { width: 9px; height: 9px; border-radius: 50%; background: #bdc8d6; }
+    .address { flex: 1; margin-left: 8px; padding: 5px 12px; border-radius: 8px; background: white; color: #6b7890; font-size: 11px; }
+    .app { display: grid; grid-template-columns: 150px 1fr; height: calc(100% - 38px); }
+    .sidebar { padding: 18px 14px; background: #10213d; color: #c6d5e9; }
+    .side-brand { margin-bottom: 22px; color: white; font-size: 13px; font-weight: 760; }
+    .nav { margin: 7px 0; padding: 8px 10px; border-radius: 8px; font-size: 11px; }
+    .nav.active { background: #244674; color: white; }
+    .content { padding: 20px 24px; }
+    .content-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 17px; }
+    h1 { margin: 0; font-size: 23px; letter-spacing: -0.03em; }
+    .sso { display: flex; gap: 7px; align-items: center; padding: 6px 9px; border: 1px solid #d4deea; border-radius: 999px; font-size: 10px; }
+    .sso-dot { width: 7px; height: 7px; border-radius: 50%; background: #21b878; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+    .stat { padding: 13px; border: 1px solid #dce5f0; border-radius: 10px; background: white; }
+    .stat-label { color: #77849a; font-size: 9px; font-weight: 750; text-transform: uppercase; }
+    .stat-value { margin-top: 4px; font-size: 23px; font-weight: 800; }
+    .table { overflow: hidden; border: 1px solid #dce5f0; border-radius: 10px; background: white; }
+    .row { display: grid; grid-template-columns: 2fr 1fr 1fr; padding: 10px 13px; border-bottom: 1px solid #e7edf5; font-size: 10px; }
+    .row:last-child { border-bottom: 0; }
+    .row.head { color: #77849a; font-size: 8px; font-weight: 750; text-transform: uppercase; }
+    .result-banner { position: absolute; top: 54px; right: 22px; padding: 10px 13px; border: 1px solid #96dfba; border-radius: 10px; background: #e8faf1; color: #17633e; font-size: 11px; font-weight: 720; opacity: 0; transform: translateY(-6px); }
+    .background-badge { position: absolute; right: 20px; bottom: 18px; display: flex; gap: 8px; align-items: center; padding: 9px 12px; border-radius: 999px; background: #10213d; color: white; font-size: 11px; opacity: 0; }
+    .terminal { overflow: hidden; border: 1px solid #38516f; border-radius: 14px; background: #07111f; color: #cad8ea; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .terminal-head { padding: 8px 13px; border-bottom: 1px solid #22364f; color: #8094af; font-size: 10px; }
+    .terminal-body { padding: 12px 16px; }
+    .command, .output { display: none; }
+    .prompt { color: #62e6a7; }
+    .dim { color: #7790ae; }
+    .cta { position: absolute; inset: 0; display: grid; place-content: center; padding: 80px; background: #091729; text-align: center; opacity: 0; pointer-events: none; }
+    .cta h2 { margin: 18px 0 12px; font-size: 44px; letter-spacing: -0.045em; }
+    .cta p { margin: 0; color: #aebed4; font-size: 20px; }
+    .repo { margin-top: 28px; color: #62e6a7; font: 18px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .tags { display: flex; gap: 10px; justify-content: center; margin-top: 26px; }
+    .tag { padding: 8px 13px; border: 1px solid #37506f; border-radius: 999px; color: #d6e1ef; font-size: 13px; }
+    .scene-0 .msg-1,
+    .scene-1 .msg-1, .scene-1 .msg-2,
+    .scene-2 .msg-1, .scene-2 .msg-2,
+    .scene-3 .msg-1, .scene-3 .msg-2,
+    .scene-4 .msg-1, .scene-4 .msg-2, .scene-4 .msg-3 { opacity: 1; transform: none; }
+    .scene-1 .cmd-1,
+    .scene-2 .cmd-1, .scene-2 .out-1, .scene-2 .cmd-2,
+    .scene-3 .cmd-1, .scene-3 .out-1, .scene-3 .cmd-2, .scene-3 .out-2,
+    .scene-4 .cmd-1, .scene-4 .out-1, .scene-4 .cmd-2, .scene-4 .out-2 { display: block; }
+    .scene-3 .background-badge, .scene-4 .background-badge,
+    .scene-4 .result-banner { opacity: 1; transform: none; }
+    .scene-5 .cta { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div class="frame scene-0" id="frame">
+    <div class="topbar">
+      <div class="brand"><span class="brand-mark">BR</span>Browser Relay</div>
+      <div class="disclosure">Illustrated workflow · mock internal dashboard · no real credentials</div>
+    </div>
+    <div class="stage">
+      <section class="phone" aria-label="Mobile agent conversation">
+        <div class="phone-screen">
+          <div class="phone-head">Agent</div>
+          <div class="messages">
+            <div class="bubble user msg-1">Check today’s pending approvals on my office browser.</div>
+            <div class="bubble agent msg-2">I’ll use the saved <strong>office</strong> browser through Browser Relay.</div>
+            <div class="bubble agent msg-3"><strong>3 approvals</strong> are waiting: vendor access, analytics workspace, and quarterly export.</div>
+          </div>
+          <div class="device-note">The phone is the instruction surface. The logged-in session stays on the office computer.</div>
+        </div>
+      </section>
+      <section class="workspace">
+        <div class="browser">
+          <div class="browser-chrome"><span class="traffic"></span><span class="traffic"></span><span class="traffic"></span><span class="address">internal.northstar.test/approvals</span></div>
+          <div class="app">
+            <aside class="sidebar">
+              <div class="side-brand">Northstar Internal</div>
+              <div class="nav">Overview</div><div class="nav active">Pending approvals</div><div class="nav">Reports</div><div class="nav">Team directory</div>
+            </aside>
+            <main class="content">
+              <div class="content-head"><h1>Pending approvals</h1><div class="sso"><span class="sso-dot"></span>SSO active · office device</div></div>
+              <div class="stats"><div class="stat"><div class="stat-label">Pending today</div><div class="stat-value">3</div></div><div class="stat"><div class="stat-label">Due this week</div><div class="stat-value">7</div></div><div class="stat"><div class="stat-label">Average age</div><div class="stat-value">1.4d</div></div></div>
+              <div class="table"><div class="row head"><span>Request</span><span>Owner</span><span>Status</span></div><div class="row"><span>Vendor access renewal</span><span>Maya Chen</span><span>Pending</span></div><div class="row"><span>Analytics workspace</span><span>Jon Bell</span><span>Pending</span></div><div class="row"><span>Quarterly export</span><span>Priya Shah</span><span>Pending</span></div></div>
+            </main>
+          </div>
+          <div class="result-banner">Refreshed · 3 approvals waiting</div>
+          <div class="background-badge"><span class="sso-dot"></span>Background tab · no foreground switch</div>
+        </div>
+        <div class="terminal">
+          <div class="terminal-head">Codex · Browser Relay Skill + CLI</div>
+          <div class="terminal-body">
+            <div class="command cmd-1"><span class="prompt">$</span> browser-relay tabs --remote office</div>
+            <div class="output out-1"><span class="dim">OFFICE-42</span> &nbsp; Pending approvals &nbsp; internal.northstar.test</div>
+            <div class="command cmd-2"><span class="prompt">$</span> browser-relay click '[data-testid="refresh-approvals"]' --remote office</div>
+            <div class="output out-2">Clicked: Refresh approvals &nbsp; <span class="dim">strategy=dom</span></div>
+          </div>
+        </div>
+      </section>
+    </div>
+    <section class="cta">
+      <div class="brand-mark" style="margin:auto;width:58px;height:58px;border-radius:16px">BR</div>
+      <h2>Your agent. Your existing Chrome. Any machine.</h2>
+      <p>Agent-native Skill + CLI · Free and MIT licensed</p>
+      <div class="tags"><span class="tag">No blank browser profile</span><span class="tag">Local or multi-machine</span><span class="tag">Inspectable CLI</span></div>
+      <div class="repo">github.com/reliefeai/browser-relay</div>
+    </section>
+  </div>
+  <script>
+    const step = Math.max(0, Math.min(5, Number(new URLSearchParams(location.search).get('step') || 0)));
+    document.getElementById('frame').className = `frame scene-${step}`;
+  </script>
+</body>
+</html>

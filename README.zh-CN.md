@@ -26,6 +26,14 @@
   <a href="#远程控制remote-relay">远程</a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/reliefeai/browser-relay/blob/main/docs/assets/browser-relay-mobile-to-office.mp4">
+    <img src="https://raw.githubusercontent.com/reliefeai/browser-relay/main/docs/assets/browser-relay-mobile-to-office.gif" width="960" alt="Browser Relay 示意流程：手机上的 Agent 通过 Skill 和 CLI 操作办公室电脑现有 Chrome 中的 mock 内网页面">
+  </a>
+</p>
+
+<p align="center"><sub>示意流程使用 mock 数据，不含真实凭据。点击动画可查看 MP4 版本。</sub></p>
+
 Browser Relay 通过面向 Agent 的 **Skill + CLI**，让 AI Agent 加入你每天正在使用的 Chrome。它不会创建空白的自动化浏览器，不需要反复把另一个浏览器窗口拉到前台，也不用重新登录。你和 Agent 共用同一个日常浏览器——既可以在本机，也可以跨多台机器。
 
 它特别适合这些任务：人在外面用手机上的 Agent 操作电脑浏览器；在家里让 Agent 使用公司电脑上已有内网、SSO 和设备信任的 Chrome；或者让一个 Agent 根据登录态和网络环境，在多台机器的浏览器之间工作。

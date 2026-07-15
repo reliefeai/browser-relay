@@ -29,6 +29,14 @@
   <a href="README.zh-CN.md">中文</a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/reliefeai/browser-relay/blob/main/docs/assets/browser-relay-mobile-to-office.mp4">
+    <img src="https://raw.githubusercontent.com/reliefeai/browser-relay/main/docs/assets/browser-relay-mobile-to-office.gif" width="960" alt="Illustrated Browser Relay workflow: an agent on a phone uses the Skill and CLI to operate a mock internal dashboard in the existing Chrome browser on an office machine">
+  </a>
+</p>
+
+<p align="center"><sub>Illustrated workflow with mock data and no real credentials. Click the animation for the MP4 version.</sub></p>
+
 Browser Relay lets an AI agent join the Chrome browser you already use through an agent-native **Skill + CLI**. It does not launch a blank automation profile, keep pulling another browser window to the foreground, or make you log in again. You and the agent work in the same everyday browser — locally or across multiple machines.
 
 Use it when the task lives in a browser that already has the right login, extensions, device trust, or network access: operate your desktop browser from an agent on your phone, reach an internal system through the already-authenticated browser on your work computer, or let one agent work across browsers on several machines.

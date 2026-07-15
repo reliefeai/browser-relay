@@ -18,7 +18,8 @@
     "server/",
     "extension/",
     "hub/",
-    "docs/",
+    "docs/remote-control-hub.md",
+    "docs/demo/intranet.html",
     "skill/",
     "README.md",
     "README.zh-CN.md"

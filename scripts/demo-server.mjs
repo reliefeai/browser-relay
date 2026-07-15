@@ -10,7 +10,8 @@ const port = Number(process.env.PORT || 4173);
 
 const server = createServer((request, response) => {
   const path = request.url === "/" ? "/intranet.html" : request.url;
-  if (path !== "/intranet.html") {
+  const pathname = path.split("?", 1)[0];
+  if (!new Set(["/intranet.html", "/story.html"]).has(pathname)) {
     response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     response.end("Not found\n");
     return;
@@ -20,7 +21,7 @@ const server = createServer((request, response) => {
     "cache-control": "no-store",
     "content-type": "text/html; charset=utf-8",
   });
-  createReadStream(join(root, "intranet.html")).pipe(response);
+  createReadStream(join(root, pathname.slice(1))).pipe(response);
 });
 
 server.listen(port, "127.0.0.1", () => {
