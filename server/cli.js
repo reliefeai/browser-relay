@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn, spawnSync, execSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, platform } from "node:os";
@@ -1167,12 +1167,21 @@ function readRemotes() {
 
 function writeRemotes(remotes) {
   const dir = dirname(REMOTES_PATH);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(REMOTES_PATH, JSON.stringify(remotes, null, 2) + "\n");
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (sys !== "win32") chmodSync(dir, 0o700);
+  writeFileSync(REMOTES_PATH, JSON.stringify(remotes, null, 2) + "\n", { mode: 0o600 });
+  if (sys !== "win32") chmodSync(REMOTES_PATH, 0o600);
 }
 
 function shortDeviceId(id) {
-  return id.length > 26 ? `${id.slice(0, 14)}…${id.slice(-8)}` : id;
+  return "(redacted)";
+}
+
+function publicRemotes(remotes) {
+  return Object.fromEntries(Object.entries(remotes).map(([alias, entry]) => [alias, {
+    maskedDeviceId: shortDeviceId(entry?.deviceId),
+    host: entry?.host,
+  }]));
 }
 
 function remoteCommand(args) {
@@ -1206,7 +1215,7 @@ function remoteCommand(args) {
   }
 
   if (sub === undefined || sub === "ls" || sub === "list") {
-    if (flagBool(flags, "json")) return printData(remotes, true);
+    if (flagBool(flags, "json")) return printData(publicRemotes(remotes), true);
     const names = Object.keys(remotes);
     if (!names.length) {
       console.log("No saved remotes. Add one:  browser-relay remote add <alias> <device-id>");

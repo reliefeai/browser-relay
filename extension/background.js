@@ -3,6 +3,7 @@
 
 import { SNAPSHOT_JS } from './snapshot.js'
 import { buildWaitExpression, normalizeWaitOptions } from './wait.js'
+import { createRemoteAuthMessageHandler } from './remote-auth.js'
 
 const DEFAULT_PORT = 18795
 const DEFAULT_REMOTE_HOST = 'https://relay.linso.ai'
@@ -902,9 +903,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 const REMOTE_RECONNECT_DELAYS = [1000, 2000, 5000, 10000, 15000]
 let remoteReconnectAttempt = 0
+let remoteAuthenticated = false
 
 function remoteConnected() {
-  return !!remoteWs && remoteWs.readyState === WebSocket.OPEN
+  return !!remoteWs && remoteWs.readyState === WebSocket.OPEN && remoteAuthenticated
 }
 
 function remoteWsBase(host) {
@@ -936,11 +938,9 @@ function remoteStatusPayload() {
   }
 }
 
-// Browsers can't set headers on WebSocket, so the secret rides in ?token=
-// (the hub accepts token OR Authorization: Bearer).
 function remoteHubUrl(config) {
   const base = remoteWsBase(config.remoteHost)
-  return `${base}/v1/device/connect?routeId=${encodeURIComponent(config.remoteRouteId)}&token=${encodeURIComponent(config.remoteSecret)}`
+  return `${base}/v1/device/connect?routeId=${encodeURIComponent(config.remoteRouteId)}`
 }
 
 async function ensureRemoteHubConnection() {
@@ -953,11 +953,22 @@ async function ensureRemoteHubConnection() {
   remoteConnectPromise = (async () => {
     const ws = new WebSocket(remoteHubUrl(cfg))
     remoteWs = ws
-    ws.onmessage = (event) => { void whenReady(() => handleHubMessage(String(event.data || ''))) }
+    remoteAuthenticated = false
 
     await new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('Hub connect timeout')), 8000)
-      ws.onopen = () => { clearTimeout(t); resolve() }
+      const handleRemoteFrame = createRemoteAuthMessageHandler({
+        onAuthenticated: () => {
+          clearTimeout(t)
+          remoteAuthenticated = true
+          resolve()
+        },
+        onMessage: (text) => { void whenReady(() => handleHubMessage(text)) },
+      })
+      ws.onmessage = (event) => handleRemoteFrame(String(event.data || ''))
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'device.auth', secret: cfg.remoteSecret }))
+      }
       ws.onerror = () => { clearTimeout(t); reject(new Error('Hub connect failed')) }
       ws.onclose = (ev) => { clearTimeout(t); reject(new Error(`Hub closed (${ev.code})`)) }
     })
@@ -982,6 +993,8 @@ async function ensureRemoteHubConnection() {
     return true
   } catch (err) {
     remoteLastError = err instanceof Error ? err.message : String(err)
+    remoteAuthenticated = false
+    try { remoteWs?.close() } catch { /* ignore */ }
     remoteWs = null
     scheduleRemoteReconnect()
     return false
@@ -992,6 +1005,7 @@ async function ensureRemoteHubConnection() {
 
 function onRemoteHubClosed(reason) {
   remoteWs = null
+  remoteAuthenticated = false
   remoteConnectedAt = null
   remoteLastError = `disconnected (${reason})`
   scheduleRemoteReconnect()
@@ -1015,6 +1029,7 @@ function closeRemoteHub({ disable = false } = {}) {
   remoteReconnectAttempt = 0
   const ws = remoteWs
   remoteWs = null
+  remoteAuthenticated = false
   remoteConnectedAt = null
   if (ws) { try { ws.onclose = null; ws.onerror = null; ws.close() } catch { /* ignore */ } }
   if (disable) { remoteConfig = null; remoteLastError = null }

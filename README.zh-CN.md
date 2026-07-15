@@ -197,6 +197,10 @@ browser-relay remote add mymac br-xxxx
 browser-relay tabs --remote mymac
 ```
 
+保存的远程 Device ID 属于凭据。POSIX 系统会将其写入
+`~/.browser-relay/remotes.json`，并强制目录为 `0700`、文件为 `0600`；旧版本创建的宽权限也会在再次写入时自动收紧。
+`browser-relay remote ls`（包括 `--json`）只返回 `(redacted)`，不会输出保存的 capability 或其中任何字符。
+
 **自建你自己的 Relay 服务** —— 一键把 `hub/` 里的 Worker 部署到你自己的 Cloudflare 账号:
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub)

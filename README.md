@@ -200,6 +200,12 @@ browser-relay remote add mymac br-xxxx
 browser-relay tabs --remote mymac
 ```
 
+Saved remote IDs are credentials. On POSIX systems Browser Relay stores them in
+`~/.browser-relay/remotes.json` and enforces `0700` on the directory and `0600` on
+the file, including tightening permissions created by older versions.
+`browser-relay remote ls`, including `--json`, returns only `(redacted)` IDs; it never
+prints the stored capability.
+
 **Run your own relay** instead of the hosted one — one click deploys the Worker in `hub/` to your own Cloudflare account:
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/reliefeai/browser-relay/tree/main/hub)

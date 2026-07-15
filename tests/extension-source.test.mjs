@@ -38,6 +38,16 @@ test('extension external-control talks directly to hub, not local relay remote e
   assert.match(background, /async function handleHubMessage\s*\(/);
   assert.match(background, /msg\?\.type === 'enableRemoteControl'/);
   assert.match(background, /msg\?\.type === 'disableRemoteControl'/);
+  assert.match(background, /type: 'device\.auth', secret: cfg\.remoteSecret/);
+  assert.match(background, /createRemoteAuthMessageHandler/);
+  const remoteConnectSource = background.slice(
+    background.indexOf('async function ensureRemoteHubConnection'),
+    background.indexOf('function onRemoteHubClosed'),
+  );
+  assert.equal((remoteConnectSource.match(/ws\.onmessage\s*=/g) || []).length, 1);
+  assert.match(background, /remoteAuthenticated = true[\s\S]*resolve\(\)/);
+  assert.match(background, /function remoteConnected\(\)[\s\S]*remoteAuthenticated/);
+  assert.doesNotMatch(background, /device\/connect\?[^\n`]*token=/);
 });
 
 test('remote click falls back to DOM click when the controlled tab is in the background', () => {

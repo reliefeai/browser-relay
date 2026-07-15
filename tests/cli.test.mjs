@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -107,6 +108,70 @@ for (const agent of agents) {
     },
   };
 }
+
+test('remote add creates POSIX credential storage with private permissions', { skip: process.platform === 'win32' }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'browser-relay-remotes-new-'));
+  const home = join(root, 'home');
+  mkdirSync(home, { recursive: true });
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const deviceId = 'br-G1PMrqZmTckQP63P';
+
+  const result = await runCli(t, 0, ['remote', 'add', 'office', deviceId], { HOME: home, USERPROFILE: home });
+  assert.equal(result.code, 0, result.stderr);
+  const dir = join(home, '.browser-relay');
+  const file = join(dir, 'remotes.json');
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.doesNotMatch(result.stdout + result.stderr, new RegExp(deviceId));
+
+  const jsonList = await runCli(t, 0, ['remote', 'ls', '--json'], { HOME: home, USERPROFILE: home });
+  assert.equal(jsonList.code, 0, jsonList.stderr);
+  assert.doesNotMatch(jsonList.stdout + jsonList.stderr, /G1PMrqZmTckQP63P|br-G1PMrqZmTckQP63P/);
+  assert.deepEqual(JSON.parse(jsonList.stdout).office, {
+    maskedDeviceId: '(redacted)',
+    host: 'https://relay.linso.ai',
+  });
+  for (const fragment of ['G1PM', 'rqZm', 'TckQ', 'P63P']) {
+    assert.equal((jsonList.stdout + jsonList.stderr).includes(fragment), false);
+  }
+
+  const humanList = await runCli(t, 0, ['remote', 'ls'], { HOME: home, USERPROFILE: home });
+  assert.equal(humanList.code, 0, humanList.stderr);
+  assert.doesNotMatch(humanList.stdout + humanList.stderr, /G1PMrqZmTckQP63P|br-G1PMrqZmTckQP63P/);
+  assert.match(humanList.stdout, /\(redacted\)/);
+  for (const fragment of ['G1PM', 'rqZm', 'TckQ', 'P63P']) {
+    assert.equal((humanList.stdout + humanList.stderr).includes(fragment), false);
+  }
+});
+
+test('remote add tightens existing wide POSIX credential storage permissions', { skip: process.platform === 'win32' }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'browser-relay-remotes-existing-'));
+  const home = join(root, 'home');
+  const dir = join(home, '.browser-relay');
+  const file = join(dir, 'remotes.json');
+  mkdirSync(dir, { recursive: true, mode: 0o755 });
+  writeFileSync(file, '{}\n', { mode: 0o644 });
+  chmodSync(dir, 0o755);
+  chmodSync(file, 0o644);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const result = await runCli(t, 0, ['remote', 'add', 'office', 'br-G1PMrqZmTckQP63P'], { HOME: home, USERPROFILE: home });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+});
+
+test('remote validation errors do not echo a supplied device capability', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'browser-relay-remotes-error-'));
+  const home = join(root, 'home');
+  mkdirSync(home, { recursive: true });
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const invalidDeviceId = 'br-secret-that-must-never-appear-in-errors!';
+
+  const result = await runCli(t, 0, ['remote', 'add', 'office', invalidDeviceId], { HOME: home, USERPROFILE: home });
+  assert.equal(result.code, 1);
+  assert.doesNotMatch(result.stdout + result.stderr, new RegExp(invalidDeviceId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
 
 test('skill install passes explicit agents and verifies every copied target', async (t) => {
   const fixture = setupFakeNpx(t);

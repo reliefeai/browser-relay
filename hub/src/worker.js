@@ -1,5 +1,6 @@
 const MAX_BODY_SIZE = 128 * 1024;
 const RPC_TIMEOUT_MS = 30_000;
+const DEVICE_AUTH_TIMEOUT_MS = 5_000;
 
 function jsonResponse(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
@@ -38,6 +39,14 @@ async function sha256Hex(value) {
   const data = new TextEncoder().encode(String(value));
   const hash = await crypto.subtle.digest("SHA-256", data);
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function deriveRouteId(secret) {
+  const data = new TextEncoder().encode(String(secret));
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+  let binary = "";
+  for (const byte of hash) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "").slice(0, 16);
 }
 
 function safeEqualString(a, b) {
@@ -97,9 +106,12 @@ export class BrowserRelayDevice {
   // secretHash lives only in memory. The device's connect claims it (claim: true);
   // CLI rpc/status must match a live claim — no device connected means no claim,
   // which reads as "offline" rather than silently registering a credential.
-  async authorize(secret, { claim = false } = {}) {
+  async authorize(secret, { claim = false, routeId = "" } = {}) {
     if (!isSecret(secret)) {
       return { ok: false, status: 401, code: "invalid_remote_device", message: "Invalid or missing remote device credentials" };
+    }
+    if (!isRouteId(routeId) || !safeEqualString(routeId, await deriveRouteId(secret))) {
+      return { ok: false, status: 401, code: "invalid_remote_device", message: "Invalid or revoked remote device id" };
     }
     const incomingHash = await sha256Hex(secret);
     if (!this.secretHash) {
@@ -116,31 +128,71 @@ export class BrowserRelayDevice {
     if (request.headers.get("Upgrade") !== "websocket") {
       return jsonResponse(errorPayload("upgrade_required", "WebSocket upgrade required", { status: 426 }), 426);
     }
-    const secret = url.searchParams.get("token") || bearerToken(request.headers);
-    const auth = await this.authorize(secret, { claim: true });
-    if (!auth.ok) return jsonResponse(errorPayload(auth.code, auth.message, { status: auth.status }), auth.status);
-
-    if (this.deviceSocket && this.deviceSocket.readyState === WebSocket.OPEN) {
-      try { this.deviceSocket.close(4001, "superseded"); } catch {}
-    }
-
     const { client, server } = websocketPair();
     server.accept();
-    this.deviceSocket = server;
-    this.connectedAt = new Date().toISOString();
-    this.lastSeen = this.connectedAt;
+    let authenticated = false;
+    const authTimer = setTimeout(() => {
+      if (!authenticated) server.close(4008, "authentication timeout");
+    }, DEVICE_AUTH_TIMEOUT_MS);
 
-    server.addEventListener("message", (event) => this.handleDeviceMessage(event.data));
-    server.addEventListener("close", () => this.handleDeviceClose(server));
-    server.addEventListener("error", () => this.handleDeviceClose(server));
+    const authenticate = async (secret) => {
+      if (authenticated) return true;
+      const auth = await this.authorize(secret, { claim: true, routeId: url.searchParams.get("routeId") || "" });
+      if (!auth.ok) {
+        clearTimeout(authTimer);
+        server.close(4003, "authentication failed");
+        return false;
+      }
+      if (this.deviceSocket && this.deviceSocket.readyState === WebSocket.OPEN && this.deviceSocket !== server) {
+        try { this.deviceSocket.close(4001, "superseded"); } catch {}
+      }
+      this.deviceSocket = server;
+      this.connectedAt = new Date().toISOString();
+      this.lastSeen = this.connectedAt;
+      authenticated = true;
+      clearTimeout(authTimer);
+      server.send(JSON.stringify({ type: "device.authenticated" }));
+      return true;
+    };
+
+    const legacySecret = url.searchParams.get("token") || bearerToken(request.headers);
+    if (legacySecret && !(await authenticate(legacySecret))) {
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    server.addEventListener("message", (event) => {
+      void (async () => {
+        let msg;
+        try { msg = JSON.parse(String(event.data)); } catch { return; }
+        if (!authenticated) {
+          if (msg.type === "device.auth" && typeof msg.secret === "string") await authenticate(msg.secret);
+          else {
+            clearTimeout(authTimer);
+            server.close(4003, "authenticate first");
+          }
+          return;
+        }
+        if (msg.type === "device.auth") return;
+        this.handleDeviceMessage(server, event.data);
+      })();
+    });
+    server.addEventListener("close", () => {
+      clearTimeout(authTimer);
+      if (authenticated) this.handleDeviceClose(server);
+    });
+    server.addEventListener("error", () => {
+      clearTimeout(authTimer);
+      if (authenticated) this.handleDeviceClose(server);
+    });
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  handleDeviceMessage(raw) {
+  handleDeviceMessage(socket, raw) {
     let msg;
     try { msg = JSON.parse(String(raw)); }
     catch { return; }
+    if (this.deviceSocket !== socket) return;
     this.lastSeen = new Date().toISOString();
 
     if (msg.type === "device.hello") {
@@ -171,7 +223,7 @@ export class BrowserRelayDevice {
   async handleRpc(request) {
     const body = await readJson(request);
     const secret = bearerToken(request.headers);
-    const auth = await this.authorize(secret);
+    const auth = await this.authorize(secret, { routeId: String(body.routeId || "") });
     if (!auth.ok) return jsonResponse(errorPayload(auth.code, auth.message, { status: auth.status }), auth.status);
     if (!body.method || !body.path) {
       return jsonResponse(errorPayload("invalid_request", "method and path are required", { status: 400 }), 400);
@@ -231,7 +283,7 @@ export class BrowserRelayDevice {
   async handleStatus(request) {
     const routeId = new URL(request.url).searchParams.get("routeId") || "";
     const secret = bearerToken(request.headers);
-    const auth = await this.authorize(secret);
+    const auth = await this.authorize(secret, { routeId });
     if (!auth.ok) return jsonResponse(errorPayload(auth.code, auth.message, { status: auth.status }), auth.status);
     return jsonResponse({
       ok: true,

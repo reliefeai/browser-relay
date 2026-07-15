@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   bearerToken,
+  deriveRouteId,
   errorPayload,
   jsonHeaders,
   REMOTE_RPC_TIMEOUT_MS,
@@ -13,6 +14,7 @@ import {
 const HUB_HOST = process.env.BROWSER_RELAY_HUB_HOST || "127.0.0.1";
 const HUB_PORT = Number.parseInt(process.env.BROWSER_RELAY_HUB_PORT || "18796", 10);
 const MAX_BODY_SIZE = 128 * 1024;
+const DEVICE_AUTH_TIMEOUT_MS = Number.parseInt(process.env.BROWSER_RELAY_DEVICE_AUTH_TIMEOUT_MS || "5000", 10);
 
 const devices = new Map(); // routeId -> { secretHash, ws, hello, connectedAt, lastSeen, pending }
 
@@ -49,13 +51,19 @@ function getDevice(routeId) {
   return device;
 }
 
-function authorizeDevice(routeId, secret) {
+function authorizeDevice(routeId, secret, { claim = false } = {}) {
   if (!routeId || !secret) return { ok: false, status: 401, code: "invalid_remote_device", message: "Invalid or missing remote device credentials" };
+  if (!safeEqualString(routeId, deriveRouteId(secret))) {
+    return { ok: false, status: 401, code: "invalid_remote_device", message: "Invalid or revoked remote device id" };
+  }
   const device = getDevice(routeId);
   const secretHash = sha256Hex(secret);
   if (!device.secretHash) {
-    device.secretHash = secretHash;
-    return { ok: true, device, claimed: true };
+    if (claim) {
+      device.secretHash = secretHash;
+      return { ok: true, device, claimed: true };
+    }
+    return { ok: false, status: 409, code: "remote_device_offline", message: "Remote Browser Relay device is offline" };
   }
   if (!safeEqualString(device.secretHash, secretHash)) {
     return { ok: false, status: 401, code: "invalid_remote_device", message: "Invalid or revoked remote device id" };
@@ -77,10 +85,11 @@ function clearPending(device, payload) {
   }
 }
 
-function handleDeviceMessage(routeId, device, raw) {
+function handleDeviceMessage(routeId, device, ws, raw) {
   let msg;
   try { msg = JSON.parse(String(raw)); }
   catch { return; }
+  if (device.ws !== ws) return;
   device.lastSeen = new Date().toISOString();
 
   if (msg.type === "device.hello") {
@@ -194,31 +203,66 @@ server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   if (url.pathname !== "/v1/device/connect") return rejectUpgrade(socket, 404, "Not Found");
   const routeId = url.searchParams.get("routeId") || "";
-  const secret = url.searchParams.get("token") || bearerToken(req.headers);
-  const auth = authorizeDevice(routeId, secret);
-  if (!auth.ok) return rejectUpgrade(socket, auth.status, "Unauthorized");
+  if (!routeId) return rejectUpgrade(socket, 401, "Unauthorized");
+  const legacySecret = url.searchParams.get("token") || bearerToken(req.headers);
 
   wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit("connection", ws, req, routeId, auth.device, auth.claimed);
+    wss.emit("connection", ws, req, routeId, legacySecret);
   });
 });
 
-wss.on("connection", (ws, req, routeId, device, claimed) => {
-  if (device.ws && device.ws.readyState === WebSocket.OPEN) {
-    try { device.ws.close(4001, "superseded"); } catch {}
-  }
-  device.ws = ws;
-  device.connectedAt = new Date().toISOString();
-  device.lastSeen = device.connectedAt;
-  log("device.connect", { routeId, claimed, remote: req.socket.remoteAddress || "unknown" });
+wss.on("connection", (ws, req, routeId, legacySecret) => {
+  let authenticated = false;
+  let device = null;
+  const authTimer = setTimeout(() => {
+    if (!authenticated) ws.close(4008, "authentication timeout");
+  }, DEVICE_AUTH_TIMEOUT_MS);
 
-  ws.on("message", (raw) => handleDeviceMessage(routeId, device, raw));
-  ws.on("close", (code, reason) => {
-    if (device.ws !== ws) return;
+  const authenticate = (secret, { legacy = false } = {}) => {
+    if (authenticated) return true;
+    const auth = authorizeDevice(routeId, secret, { claim: true });
+    if (!auth.ok) {
+      clearTimeout(authTimer);
+      ws.close(4003, "authentication failed");
+      return false;
+    }
+    device = auth.device;
+    if (device.ws && device.ws.readyState === WebSocket.OPEN && device.ws !== ws) {
+      try { device.ws.close(4001, "superseded"); } catch {}
+    }
+    device.ws = ws;
+    device.connectedAt = new Date().toISOString();
+    device.lastSeen = device.connectedAt;
+    authenticated = true;
+    clearTimeout(authTimer);
+    ws.send(JSON.stringify({ type: "device.authenticated" }));
+    log("device.connect", { routeId, claimed: auth.claimed, legacy, remote: req.socket.remoteAddress || "unknown" });
+    return true;
+  };
+
+  if (legacySecret) authenticate(legacySecret, { legacy: true });
+
+  ws.on("message", (raw) => {
+    let msg;
+    try { msg = JSON.parse(String(raw)); } catch { return; }
+    if (!authenticated) {
+      if (msg.type === "device.auth" && typeof msg.secret === "string") authenticate(msg.secret);
+      else {
+        clearTimeout(authTimer);
+        ws.close(4003, "authenticate first");
+      }
+      return;
+    }
+    if (msg.type === "device.auth") return;
+    handleDeviceMessage(routeId, device, ws, raw);
+  });
+  ws.on("close", (code) => {
+    clearTimeout(authTimer);
+    if (!authenticated || device?.ws !== ws) return;
     device.ws = null;
     device.lastSeen = new Date().toISOString();
     clearPending(device, errorPayload("remote_device_offline", "Remote Browser Relay device disconnected", { status: 409, retryable: true }));
-    log("device.disconnect", { routeId, code, reason: reason ? String(reason) : "" });
+    log("device.disconnect", { routeId, code });
   });
   ws.on("error", () => {});
 });

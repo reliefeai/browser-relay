@@ -176,12 +176,12 @@ sequenceDiagram
 
   User->>Ext: Enable External Control
   Ext->>Ext: generate routeId + secret
-  Ext->>Relay: POST /api/remote/enable { hub, routeId, secret }
-  Relay->>Hub: WSS /v1/device/connect routeId + Authorization
+  Ext->>Hub: WSS /v1/device/connect?routeId=...
+  Ext->>Hub: device.auth { secret }
   Hub->>DO: route to DO(routeId)
   DO->>DO: first-writer claim or verify secret hash
-  DO-->>Relay: device.connected
-  Relay-->>Ext: { ok:true, connected:true }
+  DO-->>Ext: device.authenticated
+  Ext->>Ext: send device.hello; mark connected
   Ext-->>User: show remote-device-id and copy command
 ```
 
@@ -276,11 +276,22 @@ https://browser-relay-hub.username.workers.dev
 
 ```http
 GET /v1/device/connect?routeId=<routeId>
-Authorization: Bearer <secret>
 Upgrade: websocket
 ```
 
-连接后 device 发 hello：
+WebSocket 打开后，device 必须先发认证帧。secret 不进入 URL，避免被 CDN、代理或请求日志记录：
+
+```json
+{ "type": "device.auth", "secret": "..." }
+```
+
+Hub 验证成功后回复：
+
+```json
+{ "type": "device.authenticated" }
+```
+
+只有收到认证成功帧后，device 才发 hello，并把连接标记为 connected：
 
 ```json
 {
@@ -291,6 +302,8 @@ Upgrade: websocket
   "capabilities": ["tabs", "snapshot", "click", "type", "screenshot", "console", "network"]
 }
 ```
+
+认证前发送 `device.hello` 或 `rpc.response` 会被拒绝并关闭；未在限时内认证的连接也会关闭。Hub 为先部署兼容，暂时接受旧版 `?token=` 客户端；新扩展不保留查询参数回退。
 
 ### CLI RPC
 
@@ -384,6 +397,8 @@ MVP 安全模型：
 - 本地 daemon 主动出站连接 Hub，使用 WSS/HTTPS。
 - `remote-device-id` 是 capability，必须高熵、可撤销、可重新生成。
 - Hub 不存明文 secret，只存 hash。
+- Hub 认证时重新派生并验证 `routeId === base64url(SHA-256(secret)).slice(0,16)`；仅知道 routeId 不能抢占离线设备。
+- 认证失败响应与日志不得包含 secret。
 - CLI 不保存账号态；有 capability 才能控制。
 - 插件 UI 必须提供 Disable / Regenerate。
 
