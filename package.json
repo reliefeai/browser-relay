@@ -2,7 +2,8 @@
   "name": "@linsoai/browser-relay",
   "version": "1.2.0",
   "type": "module",
-  "description": "Universal browser relay — control your Chrome from any AI agent via HTTP API or MCP. No auth, no cloud.",
+  "description": "Let AI agents share your everyday, logged-in Chrome through a Skill + CLI — locally or across multiple machines.",
+  "homepage": "https://github.com/reliefeai/browser-relay#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/reliefeai/browser-relay.git"
@@ -36,13 +37,18 @@
     "postuninstall": "node server/uninstall.js 2>/dev/null || true"
   },
   "keywords": [
+    "agent-skill",
+    "browser-agent",
     "browser",
     "automation",
+    "cli",
     "cdp",
     "mcp",
     "ai-agent",
     "chrome",
-    "ai-tools"
+    "ai-tools",
+    "logged-in-browser",
+    "remote-browser"
   ],
   "license": "MIT",
   "publishConfig": {
