@@ -1,6 +1,6 @@
 {
   "name": "@linsoai/browser-relay",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "module",
   "description": "Let AI agents share your everyday, logged-in Chrome through a Skill + CLI — locally or across multiple machines.",
   "homepage": "https://github.com/reliefeai/browser-relay#readme",
