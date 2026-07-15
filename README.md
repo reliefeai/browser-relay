@@ -122,6 +122,8 @@ ABC123    Example Domain    https://example.com/
 
 If no tabs appear, reload the unpacked extension, then run `browser-relay fix` and retry `browser-relay tabs`. Use `browser-relay logs` if the extension still does not reconnect.
 
+For a complete read-only diagnosis, run `browser-relay doctor`. It checks the package assets, background service, relay HTTP endpoint, extension connection, attached tabs, Agent Skill, and logs without installing, restarting, or changing anything. Add `--json` for automation.
+
 ### 4. Install the Agent Skill and run the first task
 
 Browser Relay ships with an agent-friendly Skill. Print the install command:
@@ -208,6 +210,7 @@ browser-relay restart    # Restart the background service
 browser-relay fix        # Restart and clear stale session state (when tabs won't connect)
 browser-relay update     # Update the global package and refresh the service
 browser-relay status     # Show service state and HTTP health
+browser-relay doctor     # Run a complete read-only installation diagnosis
 browser-relay logs       # Tail /tmp/browser-relay.log
 browser-relay path       # Print the Chrome extension directory
 browser-relay skill      # Print the Skill install command

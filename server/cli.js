@@ -123,24 +123,48 @@ async function fix() {
   process.exit(1);
 }
 
-async function status() {
+function serviceState() {
   let loaded = false;
   let pid = null;
+  const supported = sys === "darwin" || sys === "linux";
+  const registered = sys === "darwin"
+    ? existsSync(PLIST_PATH)
+    : sys === "linux"
+      ? existsSync(SYSTEMD_PATH)
+      : false;
+  let checked = false;
+  let error = null;
   if (sys === "darwin") {
-    try {
-      const out = execSync(`launchctl list | grep ${LAUNCHD_LABEL} || true`, { encoding: "utf-8" });
-      if (out.trim()) {
+    const result = spawnSync("launchctl", ["list"], { encoding: "utf-8", timeout: 1500 });
+    if (!result.error && result.status === 0) {
+      checked = true;
+      const line = result.stdout.split("\n").find((item) => item.trim().split(/\s+/).at(-1) === LAUNCHD_LABEL);
+      if (line) {
         loaded = true;
-        const [p] = out.trim().split(/\s+/);
+        const [p] = line.trim().split(/\s+/);
         if (p && p !== "-") pid = p;
       }
-    } catch {}
+    } else {
+      error = "launchctl status is unavailable";
+    }
   } else if (sys === "linux") {
-    try {
-      const out = execSync(`systemctl --user is-active ${SYSTEMD_UNIT}`, { encoding: "utf-8" }).trim();
-      loaded = out === "active";
-    } catch {}
+    const result = spawnSync("systemctl", ["--user", "is-active", SYSTEMD_UNIT], {
+      encoding: "utf-8",
+      timeout: 1500,
+    });
+    const state = result.stdout.trim();
+    if (!result.error && (result.status === 0 || ["inactive", "failed", "deactivating"].includes(state))) {
+      checked = true;
+      loaded = state === "active";
+    } else {
+      error = "systemd user status is unavailable";
+    }
   }
+  return { loaded, pid, supported, registered, checked, error };
+}
+
+async function status() {
+  const { loaded, pid } = serviceState();
 
   let healthy = false;
   let daemonVersion = null;
@@ -160,6 +184,389 @@ async function status() {
   console.log(`Extension: ${EXTENSION_DIR}`);
   console.log(`Logs:      ${LOG_FILE}`);
   process.exit(loaded && healthy ? 0 : 1);
+}
+
+const AGENT_SKILL_ROOTS = [
+  ".claude/skills",
+  ".codex/skills",
+  ".cursor/skills",
+  ".windsurf/skills",
+  ".gemini/skills",
+  ".copilot/skills",
+  ".config/opencode/skills",
+];
+
+function doctorHelp() {
+  console.log(`Usage:
+  browser-relay doctor [--json]
+
+Runs read-only checks for the CLI package, Chrome extension, Agent Skill,
+background service, relay HTTP endpoint, extension connection, tabs, and logs.
+Warnings do not make the command fail. This command never installs or restarts anything.`);
+}
+
+function safeRelayUrl(value) {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "(invalid URL)";
+  }
+}
+
+function relayDebugUrl(value) {
+  const url = new URL(value);
+  if (url.username || url.password) throw new Error("embedded credentials are not supported");
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/api/debug`;
+  url.hash = "";
+  return url;
+}
+
+function doctorSummary(checks) {
+  return {
+    passed: checks.filter((check) => check.status === "pass").length,
+    warnings: checks.filter((check) => check.status === "warn").length,
+    failed: checks.filter((check) => check.status === "fail").length,
+    skipped: checks.filter((check) => check.status === "skip").length,
+  };
+}
+
+async function probeRelayDebug() {
+  let endpoint;
+  try {
+    endpoint = relayDebugUrl(RELAY_URL);
+  } catch (error) {
+    return {
+      ok: false,
+      message: error?.message === "embedded credentials are not supported"
+        ? "Relay URL userinfo is not supported; use a credential-free local relay URL"
+        : "Relay URL is invalid",
+    };
+  }
+
+  try {
+    const response = await fetch(endpoint, { signal: AbortSignal.timeout(2000) });
+    if (!response.ok) return { ok: false, message: `Relay returned HTTP ${response.status}` };
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      return { ok: false, message: "Relay returned invalid JSON" };
+    }
+    const valid = data
+      && typeof data === "object"
+      && !Array.isArray(data)
+      && data.ok === true
+      && typeof data.connected === "boolean"
+      && Number.isInteger(data.tabCount)
+      && data.tabCount >= 0
+      && (data.version === undefined || typeof data.version === "string");
+    if (!valid) {
+      return { ok: false, message: "Relay returned an invalid debug payload" };
+    }
+    return { ok: true, data };
+  } catch (error) {
+    const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
+    return { ok: false, message: timedOut ? "Relay request timed out after 2 seconds" : "Relay is unreachable" };
+  }
+}
+
+async function doctor(args = []) {
+  const allowed = new Set(["--json", "-j", "--help", "-h"]);
+  const json = args.includes("--json") || args.includes("-j");
+  const invalid = args.find((arg) => !allowed.has(arg));
+  if (invalid) {
+    if (json) {
+      console.log(JSON.stringify({
+        ok: false,
+        version: 1,
+        code: "invalid_option",
+        option: invalid,
+        message: `Unknown doctor option: ${invalid}`,
+      }, null, 2));
+      process.exitCode = 2;
+      return;
+    }
+    console.error(`Unknown doctor option: ${invalid}`);
+    console.error("Usage: browser-relay doctor [--json]");
+    process.exitCode = 2;
+    return;
+  }
+  if (args.includes("--help") || args.includes("-h")) {
+    doctorHelp();
+    return;
+  }
+
+  const checks = [];
+  const add = (id, statusValue, message, details, remediation) => {
+    checks.push({
+      id,
+      status: statusValue,
+      message,
+      ...(details === undefined ? {} : { details }),
+      ...(remediation ? { remediation } : {}),
+    });
+  };
+
+  let pkg = null;
+  try {
+    pkg = JSON.parse(readFileSync(join(PKG_DIR, "package.json"), "utf-8"));
+    if (!pkg?.version) throw new Error("missing version");
+    const requiredNode = pkg.engines?.node ?? null;
+    const minimumMajor = Number(requiredNode?.match(/^>=\s*(\d+)/)?.[1]);
+    const currentMajor = Number(process.versions.node.split(".")[0]);
+    const supportedNode = !Number.isFinite(minimumMajor) || currentMajor >= minimumMajor;
+    add(
+      "runtime",
+      supportedNode ? "pass" : "fail",
+      supportedNode
+        ? `CLI ${pkg.version} is readable on Node ${process.version}`
+        : `Node ${process.version} does not satisfy ${requiredNode}`,
+      { nodeVersion: process.version, requiredNode, platform: sys, arch: process.arch },
+      supportedNode ? undefined : `Upgrade Node.js to ${requiredNode}`,
+    );
+  } catch {
+    add(
+      "runtime",
+      "fail",
+      "Package metadata is missing or invalid",
+      { platform: sys, arch: process.arch },
+      "Reinstall Browser Relay with: npm install -g @linsoai/browser-relay",
+    );
+  }
+
+  const manifestPath = join(EXTENSION_DIR, "manifest.json");
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    if (!manifest?.manifest_version) throw new Error("invalid manifest");
+    add("assets.extension", "pass", "Chrome extension manifest is readable", {
+      path: EXTENSION_DIR,
+      manifestPath,
+      manifestVersion: manifest.manifest_version,
+    });
+  } catch {
+    add(
+      "assets.extension",
+      "fail",
+      "Chrome extension manifest is missing or invalid",
+      { path: EXTENSION_DIR, manifestPath },
+      "Reinstall Browser Relay with: npm install -g @linsoai/browser-relay",
+    );
+  }
+
+  try {
+    const shippedSkill = readFileSync(SKILL_PATH, "utf-8");
+    const installations = [];
+    for (const root of AGENT_SKILL_ROOTS) {
+      const installedPath = join(homedir(), root, "browser-relay/SKILL.md");
+      if (!existsSync(installedPath)) continue;
+      let statusValue = "unreadable";
+      try {
+        statusValue = readFileSync(installedPath, "utf-8") === shippedSkill ? "current" : "outdated";
+      } catch {}
+      installations.push({ path: installedPath, status: statusValue });
+    }
+    const stale = installations.filter((item) => item.status !== "current");
+    add(
+      "assets.skill",
+      stale.length ? "warn" : "pass",
+      stale.length
+        ? `Bundled Agent Skill is readable; ${stale.length} installed copy needs attention`
+        : installations.length
+          ? `Bundled Agent Skill and ${installations.length} installed copy are current`
+          : "Bundled Agent Skill is readable; no global copy was detected",
+      { path: SKILL_PATH, installCommand: `npx skills add "${join(PKG_DIR, "skill")}" -g`, installations },
+      stale.length ? `Update installed copies with: npx skills add "${join(PKG_DIR, "skill")}" -g` : undefined,
+    );
+  } catch {
+    add(
+      "assets.skill",
+      "fail",
+      "Bundled Agent Skill is missing or unreadable",
+      { path: SKILL_PATH },
+      "Reinstall Browser Relay with: npm install -g @linsoai/browser-relay",
+    );
+  }
+
+  const customRelay = Boolean(
+    process.env.BROWSER_RELAY_URL || process.env.BROWSER_RELAY_HOST || process.env.BROWSER_RELAY_PORT,
+  );
+  let service = null;
+  if (customRelay) {
+    add(
+      "service.registration",
+      "skip",
+      "Local background service check skipped for a custom relay URL",
+      { platform: sys },
+    );
+  } else if (sys !== "darwin" && sys !== "linux") {
+    add(
+      "service.registration",
+      "skip",
+      `Native background service is not supported on ${sys}; foreground mode is supported`,
+      { platform: sys },
+    );
+  } else {
+    service = serviceState();
+    if (service.loaded) {
+      add(
+        "service.registration",
+        "pass",
+        "Background service is active",
+        { registered: service.registered, pid: service.pid },
+      );
+    } else {
+      add(
+        "service.registration",
+        "warn",
+        service.checked
+          ? service.registered
+            ? "Background service is registered but inactive"
+            : "Background service is not registered"
+          : service.error,
+        { registered: service.registered },
+        service.registered ? "Start it with: browser-relay start" : "Optional: register it with: browser-relay install",
+      );
+    }
+  }
+
+  const safeUrl = safeRelayUrl(RELAY_URL);
+  const relay = await probeRelayDebug();
+  if (relay.ok) {
+    add("relay.http", "pass", "Relay HTTP debug endpoint is healthy", {
+      url: safeUrl,
+      uptimeSeconds: relay.data.uptimeSeconds ?? null,
+      daemonVersion: relay.data.version ?? null,
+    });
+  } else {
+    add(
+      "relay.http",
+      "fail",
+      relay.message,
+      { url: safeUrl },
+      service?.registered
+        ? "Run: browser-relay status, then browser-relay logs"
+        : "Start the relay in a terminal with: browser-relay",
+    );
+  }
+
+  if (relay.ok) {
+    const daemonVersion = relay.data.version;
+    if (pkg?.version && daemonVersion === pkg.version) {
+      add("relay.version", "pass", `CLI and daemon versions match (${pkg.version})`, {
+        cliVersion: pkg.version,
+        daemonVersion,
+      });
+    } else {
+      add(
+        "relay.version",
+        "warn",
+        daemonVersion
+          ? `CLI ${pkg?.version ?? "unknown"} and daemon ${daemonVersion} differ`
+          : "Relay did not report its version",
+        { cliVersion: pkg?.version ?? null, daemonVersion: daemonVersion ?? null },
+        service?.loaded ? "Restart the background relay with: browser-relay restart" : "Restart the foreground relay process",
+      );
+    }
+
+    if (relay.data.connected === true) {
+      add("extension.connection", "pass", "Chrome extension is connected");
+    } else {
+      add(
+        "extension.connection",
+        "warn",
+        relay.data.connected === false ? "Chrome extension is not connected" : "Relay did not report extension state",
+        undefined,
+        `Open Chrome and reload the unpacked extension from: ${EXTENSION_DIR}`,
+      );
+    }
+
+    if (typeof relay.data.tabCount === "number" && Number.isFinite(relay.data.tabCount)) {
+      const count = relay.data.tabCount;
+      add(
+        "tabs.attached",
+        count > 0 ? "pass" : "warn",
+        count > 0 ? `${count} Chrome tab${count === 1 ? " is" : "s are"} attached` : "No Chrome tabs are attached",
+        { count },
+        count > 0 ? undefined : "Open a normal Chrome page, then run: browser-relay tabs",
+      );
+    } else {
+      add(
+        "tabs.attached",
+        "warn",
+        "Relay did not report an attached tab count",
+        undefined,
+        "Check attached tabs with: browser-relay tabs",
+      );
+    }
+  } else {
+    add("relay.version", "skip", "Version check skipped because relay HTTP failed");
+    add("extension.connection", "skip", "Extension check skipped because relay HTTP failed");
+    add("tabs.attached", "skip", "Tab check skipped because relay HTTP failed");
+  }
+
+  if (customRelay) {
+    add("logs.access", "skip", "Local log check skipped for a custom relay URL");
+  } else if (sys === "darwin") {
+    const available = [LOG_FILE, ERR_LOG_FILE].filter((file) => existsSync(file));
+    add(
+      "logs.access",
+      available.length ? "pass" : "warn",
+      available.length ? `${available.length} local relay log file${available.length === 1 ? " is" : "s are"} available` : "Local relay logs have not been created yet",
+      { files: [LOG_FILE, ERR_LOG_FILE], available },
+      available.length ? undefined : "After starting the service, inspect logs with: browser-relay logs",
+    );
+  } else if (sys === "linux") {
+    const journal = spawnSync("journalctl", ["--user", "-u", SYSTEMD_UNIT, "-n", "1", "--no-pager"], {
+      encoding: "utf-8",
+      timeout: 1500,
+    });
+    const accessible = !journal.error && journal.status === 0;
+    add(
+      "logs.access",
+      accessible ? "pass" : "warn",
+      accessible ? "Relay logs are accessible through the user journal" : "The user journal is not currently accessible",
+      { command: `journalctl --user -u ${SYSTEMD_UNIT}` },
+      accessible ? undefined : "If running in the foreground, inspect the current terminal output",
+    );
+  } else {
+    add("logs.access", "skip", "Relay logs are available in the foreground terminal on this platform");
+  }
+
+  const summary = doctorSummary(checks);
+  const ok = summary.failed === 0;
+  const recommendations = [...new Set(checks.map((check) => check.remediation).filter(Boolean))];
+  const payload = {
+    ok,
+    version: 1,
+    platform: sys,
+    cliVersion: pkg?.version ?? null,
+    relayUrl: safeUrl,
+    checks,
+    summary,
+    recommendations,
+  };
+
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2));
+  } else {
+    console.log("Browser Relay doctor");
+    console.log("");
+    for (const check of checks) console.log(`[${check.status.toUpperCase()}] ${check.message}`);
+    console.log("");
+    console.log(`Doctor: ${summary.passed} passed, ${summary.warnings} warnings, ${summary.failed} failed, ${summary.skipped} skipped`);
+    if (recommendations.length) {
+      console.log("");
+      console.log("Next steps:");
+      for (const recommendation of recommendations) console.log(`  - ${recommendation}`);
+    }
+  }
+
+  if (!ok) process.exitCode = 1;
 }
 
 function logs() {
@@ -285,6 +692,7 @@ Commands:
   fix         Restart and clear stale session state (run when tabs won't connect)
   update      Update the global npm package and refresh the service
   status      Show service + HTTP health
+  doctor      Check the full install → extension → tab → Skill path
   logs        Tail the service logs
   path        Print the Chrome extension directory
   skill       Print the skill directory + 'npx skills' install command
@@ -974,6 +1382,7 @@ switch (cmd) {
   case "fix": await fix(); break;
   case "update": await update(process.argv.slice(3)); break;
   case "status": await status(); break;
+  case "doctor": await doctor(process.argv.slice(3)); break;
   case "logs": logs(); break;
   case "path": path(); break;
   case "skill": skill(); break;

@@ -113,6 +113,8 @@ ABC123    Example Domain    https://example.com/
 
 如果没有标签页，先重新加载 unpacked 扩展，再执行 `browser-relay fix`，然后重试 `browser-relay tabs`。扩展仍未连接时，用 `browser-relay logs` 查看日志。
 
+需要一次性排查完整链路时，运行 `browser-relay doctor`。它会只读检查包内资源、后台服务、relay HTTP、扩展连接、已附加标签页、Agent Skill 和日志，不会安装、重启或改动任何内容；自动化场景可加 `--json`。
+
 ### 4. 安装 Agent Skill 并完成第一个任务
 
 Browser Relay 自带 Agent Skill:
@@ -199,6 +201,7 @@ browser-relay restart    # 重启后台服务
 browser-relay fix        # 重启并清理失效会话（标签页连不上时用）
 browser-relay update     # 更新全局 npm 包并刷新后台服务
 browser-relay status     # 查看服务状态和 HTTP 健康检查
+browser-relay doctor     # 执行完整的只读安装诊断
 browser-relay logs       # 查看 /tmp/browser-relay.log
 browser-relay path       # 输出 Chrome 扩展目录
 browser-relay skill      # 输出 Skill 安装命令
