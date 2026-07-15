@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, platform } from "node:os";
 import { execSync } from "node:child_process";
+import { installWindowsTask } from "./windows-service.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RELAY_DIR = dirname(__dirname);
 const EXTENSION_DIR = join(RELAY_DIR, "extension");
 const CLI_PATH = join(__dirname, "cli.js");
+const WINDOWS_SERVICE_ENTRY_PATH = join(__dirname, "windows-service-entry.js");
 const NODE_PATH = process.execPath;
 const LAUNCHD_LABEL = "org.browser-relay.service";
 
@@ -73,8 +75,10 @@ function installDarwin() {
   try {
     execSync(`launchctl bootstrap ${domain} "${plistDst}"`);
     log(`Registered with launchd (node=${NODE_PATH}).`);
+    return true;
   } catch (e) {
     log(`launchctl bootstrap failed: ${e.message}. Check /tmp/browser-relay.error.log`);
+    return false;
   }
 }
 
@@ -106,14 +110,23 @@ WantedBy=default.target
     execSync("systemctl --user enable browser-relay");
     execSync("systemctl --user start browser-relay");
     log(`Registered with systemd (node=${NODE_PATH}).`);
+    return true;
   } catch (e) {
     const msg = (e instanceof Error ? e.message : String(e)).split("\n")[0];
     log(`systemd registration skipped (${msg}). Run manually: ${NODE_PATH} ${CLI_PATH}`);
+    return false;
   }
 }
 
 function installWin32() {
-  log("Windows: Run 'browser-relay' manually. To auto-start, add to startup apps.");
+  const result = installWindowsTask({
+    nodePath: NODE_PATH,
+    serviceEntryPath: WINDOWS_SERVICE_ENTRY_PATH,
+    cliPath: CLI_PATH,
+  });
+  log(`Registered with Windows Task Scheduler for the current user (node=${NODE_PATH}).`);
+  log(`Logs: ${result.paths.stdoutLog}`);
+  return true;
 }
 
 // Agents keep their own copy of the skill (installed via npx skills add).
@@ -148,46 +161,67 @@ function checkInstalledSkills() {
   log("   Run 'browser-relay skill help', then reinstall for codex, claude-code, or universal.");
 }
 
-function main() {
+async function waitForRelay(expectedVersion) {
+  for (let i = 0; i < 20; i++) {
+    try {
+      const response = await fetch("http://127.0.0.1:18795/api/debug", {
+        signal: AbortSignal.timeout(1000),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.version === expectedVersion && typeof data.connected === "boolean") return true;
+      }
+    } catch {}
+    if (i < 19) await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+  }
+  return false;
+}
+
+export async function installService(options = {}) {
+  const explicit = options.explicit === true;
+  const strict = options.strict === true;
   // Only register a background service on global installs. `npm i` (local) is
   // typically a developer adding the package as a dependency — they don't want
   // a daemon hijacking their machine.
   const isGlobal = process.env.npm_config_global === "true";
-  if (!isGlobal) {
+  if (!explicit && !isGlobal) {
     log("Local install — skipping background service registration.");
     log(`Install globally to enable auto-start: npm install -g @linsoai/browser-relay`);
     log(`Or run manually: ${NODE_PATH} ${CLI_PATH}`);
     log("");
     log(`📦 Chrome Extension: ${EXTENSION_DIR}`);
     log(`📖 Agent Skill:      ${join(RELAY_DIR, "skill/SKILL.md")}`);
-    return;
+    return { installed: false, skipped: true };
   }
 
   log("Setting up Browser Relay...");
 
   const sys = platform();
 
+  let registered = false;
   if (sys === "darwin") {
-    installDarwin();
+    registered = installDarwin();
   } else if (sys === "linux") {
-    installLinux();
+    registered = installLinux();
   } else if (sys === "win32") {
-    installWin32();
+    registered = installWin32();
   } else {
     log(`Unsupported platform: ${sys}. Run 'browser-relay' manually.`);
-    return;
+    if (strict) throw new Error(`Background service is not supported on ${sys}`);
+    return { installed: false, skipped: true };
   }
 
-  // Verify it's running
-  for (let i = 0; i < 10; i++) {
-    try {
-      execSync("curl -s http://127.0.0.1:18795/ > /dev/null");
+  if (!registered) {
+    if (strict) throw new Error("Background service registration failed");
+  } else {
+    const pkg = JSON.parse(readFileSync(join(RELAY_DIR, "package.json"), "utf-8"));
+    const healthy = await waitForRelay(pkg.version);
+    if (healthy) {
       log("✅ Relay is running on http://127.0.0.1:18795");
-      break;
-    } catch {
-      if (i === 9) {
-        log("⚠️  Relay may still be starting. Check: curl http://127.0.0.1:18795/");
-      }
+    } else {
+      const message = "Relay did not become healthy with the installed version. Run: browser-relay status";
+      log(`⚠️  ${message}`);
+      if (strict) throw new Error(message);
     }
   }
 
@@ -201,12 +235,16 @@ function main() {
   log("");
   log("📖 Agent Skill:");
   log(`   ${join(RELAY_DIR, "skill/SKILL.md")}`);
+  return { installed: registered, skipped: false };
 }
 
 // Postinstall must never fail npm install — wrap everything.
-try {
-  main();
-} catch (e) {
-  log(`postinstall warning: ${e instanceof Error ? e.message : String(e)}`);
-  log(`Run manually: ${NODE_PATH} ${CLI_PATH}`);
+const isDirect = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+if (isDirect) {
+  try {
+    await installService();
+  } catch (e) {
+    log(`postinstall warning: ${e instanceof Error ? e.message : String(e)}`);
+    log(`Run manually: ${NODE_PATH} ${CLI_PATH}`);
+  }
 }

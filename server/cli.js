@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 import { homedir, platform } from "node:os";
 import { DEFAULT_REMOTE_HOST, parseRemoteDeviceId, remoteHttpBase } from "./remote-protocol.js";
 import { runNpxSync } from "./npx-runner.js";
+import {
+  inspectWindowsTask,
+  runWindowsTaskCommand,
+  schtasksError,
+  windowsServicePaths,
+} from "./windows-service.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_DIR = dirname(__dirname);
@@ -21,10 +27,10 @@ const RELAY_PORT = process.env.BROWSER_RELAY_PORT || "18795";
 const RELAY_URL = (process.env.BROWSER_RELAY_URL || `http://${RELAY_HOST}:${RELAY_PORT}`).replace(/\/+$/, "");
 const HEALTH_URL = `${RELAY_URL}/`;
 let remoteContext = null;
-const LOG_FILE = "/tmp/browser-relay.log";
-const ERR_LOG_FILE = "/tmp/browser-relay.error.log";
-
 const sys = platform();
+const WINDOWS_SERVICE_PATHS = windowsServicePaths();
+const LOG_FILE = sys === "win32" ? WINDOWS_SERVICE_PATHS.stdoutLog : "/tmp/browser-relay.log";
+const ERR_LOG_FILE = sys === "win32" ? WINDOWS_SERVICE_PATHS.stderrLog : "/tmp/browser-relay.error.log";
 
 async function run() {
   await import("./relay-server.js");
@@ -37,25 +43,43 @@ async function hub() {
 function ensureInstalled() {
   if (sys === "darwin" && existsSync(PLIST_PATH)) return true;
   if (sys === "linux" && existsSync(SYSTEMD_PATH)) return true;
+  if (sys === "win32") {
+    const state = inspectWindowsTask();
+    if (state.checked && state.registered && state.owned) return true;
+    if (state.checked && state.registered && !state.owned) {
+      console.error("A task named BrowserRelay exists but is not managed by Browser Relay. Refusing to control it.");
+    }
+    if (!state.checked) console.error(state.error);
+  }
   console.error("Background service not registered. Run: browser-relay install");
   process.exit(1);
 }
 
 async function install() {
   const mod = await import("./install.js");
-  // install.js runs on import (top-level main())
-  void mod;
+  try {
+    await mod.installService({ explicit: true, strict: true });
+  } catch (error) {
+    console.error(`Install failed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
 }
 
 async function uninstall() {
-  await import("./uninstall.js");
+  const mod = await import("./uninstall.js");
+  try {
+    mod.uninstallService({ explicit: true, strict: true });
+  } catch (error) {
+    console.error(`Uninstall failed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
 }
 
 function darwinDomain() {
   return `gui/${process.getuid()}`;
 }
 
-function start() {
+async function start() {
   ensureInstalled();
   if (sys === "darwin") {
     const domain = darwinDomain();
@@ -69,13 +93,27 @@ function start() {
   } else if (sys === "linux") {
     execSync(`systemctl --user start ${SYSTEMD_UNIT}`, { stdio: "inherit" });
     console.log("Started. Check: browser-relay status");
+  } else if (sys === "win32") {
+    const result = runWindowsTaskCommand("run");
+    if (result.error || result.status !== 0) {
+      const relay = await probeRelayDebug();
+      if (!relay.ok) {
+        console.error(schtasksError("Task Scheduler start", result));
+        process.exitCode = 1;
+        return false;
+      }
+      console.log("Already running. Check: browser-relay status");
+      return true;
+    }
+    console.log("Started. Check: browser-relay status");
   } else {
     console.error(`'start' not supported on ${sys}. Run 'browser-relay' in foreground instead.`);
     process.exit(1);
   }
+  return true;
 }
 
-function stop() {
+async function stop() {
   if (sys === "darwin") {
     try { execSync(`launchctl bootout ${darwinDomain()} "${PLIST_PATH}"`, { stdio: "inherit" }); }
     catch { /* not loaded */ }
@@ -83,15 +121,34 @@ function stop() {
   } else if (sys === "linux") {
     execSync(`systemctl --user stop ${SYSTEMD_UNIT}`, { stdio: "inherit" });
     console.log("Stopped.");
+  } else if (sys === "win32") {
+    ensureInstalled();
+    const result = runWindowsTaskCommand("end");
+    let relay = null;
+    for (let i = 0; i < 5; i++) {
+      relay = await probeRelayDebug();
+      if (!relay.ok) break;
+      if (i < 4) await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+    }
+    if (relay?.ok) {
+      console.error(result.error || result.status !== 0
+        ? schtasksError("Task Scheduler stop", result)
+        : "The scheduled task stopped, but a relay is still using the configured address. No unrelated process was terminated.");
+      process.exitCode = 1;
+      return false;
+    }
+    console.log(result.error || result.status !== 0 ? "Stopped (already inactive)." : "Stopped.");
   } else {
     console.error(`'stop' not supported on ${sys}.`);
     process.exit(1);
   }
+  return true;
 }
 
-function restart() {
-  stop();
-  start();
+async function restart() {
+  const stopped = await stop();
+  if (!stopped) return false;
+  return start();
 }
 
 async function fix() {
@@ -108,7 +165,7 @@ async function fix() {
 
   // Restart clears all stale session state
   console.log("Restarting relay server...");
-  restart();
+  if (!await restart()) return;
 
   // Poll until healthy
   for (let i = 0; i < 20; i++) {
@@ -128,14 +185,15 @@ async function fix() {
 function serviceState() {
   let loaded = false;
   let pid = null;
-  const supported = sys === "darwin" || sys === "linux";
-  const registered = sys === "darwin"
+  const supported = sys === "darwin" || sys === "linux" || sys === "win32";
+  let registered = sys === "darwin"
     ? existsSync(PLIST_PATH)
     : sys === "linux"
       ? existsSync(SYSTEMD_PATH)
       : false;
   let checked = false;
   let error = null;
+  let conflict = false;
   if (sys === "darwin") {
     const result = spawnSync("launchctl", ["list"], { encoding: "utf-8", timeout: 1500 });
     if (!result.error && result.status === 0) {
@@ -161,12 +219,19 @@ function serviceState() {
     } else {
       error = "systemd user status is unavailable";
     }
+  } else if (sys === "win32") {
+    const state = inspectWindowsTask();
+    checked = state.checked;
+    conflict = state.checked && state.registered && !state.owned;
+    registered = state.checked && state.registered && state.owned;
+    loaded = registered;
+    error = state.error;
   }
-  return { loaded, pid, supported, registered, checked, error };
+  return { loaded, pid, supported, registered, checked, error, conflict };
 }
 
 async function status() {
-  const { loaded, pid } = serviceState();
+  const { loaded, pid, registered, checked, error, conflict } = serviceState();
 
   let healthy = false;
   let daemonVersion = null;
@@ -180,12 +245,16 @@ async function status() {
 
   const cliVersion = JSON.parse(readFileSync(join(PKG_DIR, "package.json"), "utf-8")).version;
   const outdated = daemonVersion && daemonVersion !== cliVersion;
-  console.log(`Service:   ${loaded ? "loaded" : "not loaded"}${pid ? ` (pid ${pid})` : ""}`);
+  const serviceLabel = sys === "win32"
+    ? !checked ? "unknown (Task Scheduler query failed)" : conflict ? "name conflict (not managed)" : registered ? "registered (Task Scheduler)" : "not registered"
+    : loaded ? "loaded" : "not loaded";
+  console.log(`Service:   ${serviceLabel}${pid ? ` (pid ${pid})` : ""}`);
+  if (sys === "win32" && !checked && error) console.log(`Service error: ${error}`);
   console.log(`HTTP:      ${healthy ? "responding" : "not responding"} (${HEALTH_URL})`);
   console.log(`Version:   cli ${cliVersion}, daemon ${daemonVersion ?? "unknown"}${outdated ? "  ← outdated, run: browser-relay restart" : ""}`);
   console.log(`Extension: ${EXTENSION_DIR}`);
   console.log(`Logs:      ${LOG_FILE}`);
-  process.exit(loaded && healthy ? 0 : 1);
+  process.exit((sys === "win32" ? registered : loaded) && healthy ? 0 : 1);
 }
 
 const AGENT_SKILL_ROOTS = [
@@ -420,7 +489,7 @@ async function doctor(args = []) {
       "Local background service check skipped for a custom relay URL",
       { platform: sys },
     );
-  } else if (sys !== "darwin" && sys !== "linux") {
+  } else if (sys !== "darwin" && sys !== "linux" && sys !== "win32") {
     add(
       "service.registration",
       "skip",
@@ -429,7 +498,22 @@ async function doctor(args = []) {
     );
   } else {
     service = serviceState();
-    if (service.loaded) {
+    if (sys === "win32" && service.conflict) {
+      add(
+        "service.registration",
+        "warn",
+        "A task named BrowserRelay exists but is not managed by Browser Relay",
+        { registered: false, conflict: true, task: "BrowserRelay" },
+        "Resolve the Task Scheduler name conflict before running browser-relay install",
+      );
+    } else if (sys === "win32" && service.registered) {
+      add(
+        "service.registration",
+        "pass",
+        "Background service is registered with Windows Task Scheduler",
+        { registered: true, task: "BrowserRelay" },
+      );
+    } else if (service.loaded) {
       add(
         "service.registration",
         "pass",
@@ -550,6 +634,15 @@ async function doctor(args = []) {
       { command: `journalctl --user -u ${SYSTEMD_UNIT}` },
       accessible ? undefined : "If running in the foreground, inspect the current terminal output",
     );
+  } else if (sys === "win32") {
+    const available = [LOG_FILE, ERR_LOG_FILE].filter((file) => existsSync(file));
+    add(
+      "logs.access",
+      available.length ? "pass" : "warn",
+      available.length ? `${available.length} local relay log file${available.length === 1 ? " is" : "s are"} available` : "Local relay logs have not been created yet",
+      { files: [LOG_FILE, ERR_LOG_FILE], available },
+      available.length ? undefined : "After starting the service, inspect logs with: browser-relay logs",
+    );
   } else {
     add("logs.access", "skip", "Relay logs are available in the foreground terminal on this platform");
   }
@@ -587,11 +680,25 @@ async function doctor(args = []) {
 }
 
 function logs() {
-  if (!existsSync(LOG_FILE)) {
-    console.error(`No log file at ${LOG_FILE} yet. Start the service first.`);
+  const available = [LOG_FILE, ERR_LOG_FILE].filter((file) => existsSync(file));
+  if (!available.length) {
+    console.error(`No service logs found at ${LOG_FILE} or ${ERR_LOG_FILE}. Start the service first.`);
     process.exit(1);
   }
-  const child = spawn("tail", ["-f", LOG_FILE, ERR_LOG_FILE], { stdio: "inherit" });
+  const child = sys === "win32"
+    ? spawn("powershell.exe", [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Get-Content -LiteralPath $args -Tail 100 -Wait",
+      ...available,
+    ], { stdio: "inherit", windowsHide: true })
+    : spawn("tail", ["-f", LOG_FILE, ERR_LOG_FILE], { stdio: "inherit" });
+  child.on("error", (error) => {
+    console.error(`Could not follow service logs: ${error.message}`);
+    process.exitCode = 1;
+  });
   child.on("exit", (code) => process.exit(code ?? 0));
 }
 
@@ -869,7 +976,7 @@ Commands:
   (no args)   Run the relay server in foreground
   run         Same as no args
   hub         Run a local Browser Relay Hub for remote-control testing
-  start       Start as a background service (launchd/systemd)
+  start       Start as a background service (launchd/systemd/Task Scheduler)
   stop        Stop the background service
   restart     Restart the background service
   fix         Restart and clear stale session state (run when tabs won't connect)
@@ -1581,9 +1688,9 @@ switch (cmd) {
   case "hub":
     await hub();
     break;
-  case "start": start(); break;
-  case "stop": stop(); break;
-  case "restart": restart(); break;
+  case "start": await start(); break;
+  case "stop": await stop(); break;
+  case "restart": await restart(); break;
   case "fix": await fix(); break;
   case "update": await update(process.argv.slice(3)); break;
   case "status": await status(); break;

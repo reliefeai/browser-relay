@@ -73,7 +73,7 @@ Browser Relay 补的就是这一层(也是很多人在找的 OpenClaw Browser Re
 
 ## 快速开始
 
-使用分四步。需要桌面版 Chrome 和 Node.js/npm。macOS、Linux 会自动安装用户级后台服务；Windows 原生后台服务支持落地前，请在终端里保持 `browser-relay` 运行。
+使用分四步。需要桌面版 Chrome 和 Node.js/npm。全局安装会在 macOS、Linux 和 Windows 上注册用户级后台服务。
 
 ### 1. 安装
 
@@ -82,7 +82,15 @@ npm install -g @linsoai/browser-relay
 browser-relay status
 ```
 
-macOS 和 Linux 上,全局安装会自动注册用户级后台服务,登录后自动启动。若服务未启动,可以执行 `browser-relay start`。
+macOS 使用 launchd，Linux 使用 systemd-user，Windows 使用当前用户的任务计划程序；登录后会自动启动。Windows 任务只复用当前已登录用户的交互令牌并以最低权限运行，不保存密码、不主动提权，也不会使用 SYSTEM；标准用户能否注册任务仍可能受公司设备策略限制。
+
+若服务未启动，或 nvm 升级后 Node 路径发生变化，执行：
+
+```bash
+browser-relay install
+```
+
+`install` 可安全重复执行：它只刷新带 Browser Relay 所有权标记的服务定义、立即启动，并校验 relay HTTP 与已安装版本；若存在同名但不属于 Browser Relay 的 Windows 任务，它会拒绝覆盖。服务定义已是最新时可直接用 `browser-relay start`。若公司设备策略禁止注册 Windows 任务，命令会明确报错，不会静默换成能力不同的 Startup 降级方案；此时仍可用 `browser-relay` 前台运行。
 
 ### 2. 安装 Chrome 扩展
 
@@ -208,7 +216,7 @@ browser-relay fix        # 重启并清理失效会话（标签页连不上时�
 browser-relay update     # 更新全局 npm 包并刷新后台服务
 browser-relay status     # 查看服务状态和 HTTP 健康检查
 browser-relay doctor     # 执行完整的只读安装诊断
-browser-relay logs       # 查看 /tmp/browser-relay.log
+browser-relay logs       # 持续查看当前平台的服务日志
 browser-relay path       # 输出 Chrome 扩展目录
 browser-relay skill install --agent codex # 安装/更新并校验 Agent Skill
 browser-relay skill path                  # 输出包内 Skill 目录
@@ -316,6 +324,22 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `BROWSER_RELAY_REMOTE_HOST` | `https://relay.linso.ai` | 远程命令使用的公网 Relay 服务地址 |
 
 Chrome 扩展端口可以在扩展 Options 页面修改。
+
+后台服务与日志位置：
+
+```text
+macOS 服务: ~/Library/LaunchAgents/org.browser-relay.service.plist
+Linux 服务: ~/.config/systemd/user/browser-relay.service
+Windows 任务: BrowserRelay
+Windows 定义: %LOCALAPPDATA%\BrowserRelay\task.xml
+
+macOS 日志: /tmp/browser-relay.log, /tmp/browser-relay.error.log
+Linux 日志: journalctl --user -u browser-relay
+Windows 日志: %LOCALAPPDATA%\BrowserRelay\logs\browser-relay.log
+              %LOCALAPPDATA%\BrowserRelay\logs\browser-relay.error.log
+```
+
+Windows 上，`uninstall` 只移除 Browser Relay 任务及生成的 XML 定义，诊断日志会保留；它也绝不会为了释放 `18795` 端口而结束不属于 Browser Relay 的进程。
 
 ### 隐藏「已开始调试此浏览器」顶部提示
 

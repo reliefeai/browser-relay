@@ -76,7 +76,7 @@ Remote (Remote Relay)
 
 ## Quick Start
 
-Use Browser Relay in four steps. You need desktop Chrome plus Node.js/npm. On macOS and Linux, the package installs a user service automatically; on Windows, run `browser-relay` in a terminal until native service support lands.
+Use Browser Relay in four steps. You need desktop Chrome plus Node.js/npm. A global install registers a user-level background service on macOS, Linux, and Windows.
 
 ### 1. Install
 
@@ -85,13 +85,15 @@ npm install -g @linsoai/browser-relay
 browser-relay status
 ```
 
-On macOS and Linux, the global install registers a user-level background service through launchd or systemd-user. The service starts on login and restarts on crash.
+The global install uses launchd on macOS, systemd-user on Linux, and a current-user Task Scheduler task on Windows. The service starts when you sign in. The Windows task uses your existing interactive login token with least privilege: it does not store a password, elevate itself, or run as SYSTEM. Standard-user task registration can still be restricted by organization policy.
 
-If the service is not running yet:
+If the service is not running yet, or Node moved after an nvm upgrade:
 
 ```bash
-browser-relay start
+browser-relay install
 ```
+
+`install` is idempotent: it refreshes a Browser Relay-owned service definition, starts it immediately, and verifies the relay HTTP endpoint and installed version. It refuses to overwrite a same-name Windows task without Browser Relay's ownership marker. Use `start` when the definition is already current. If a managed Windows device blocks Task Scheduler registration, Browser Relay reports the failure instead of silently installing a weaker fallback; foreground mode (`browser-relay`) remains available.
 
 ### 2. Load the Chrome extension
 
@@ -217,7 +219,7 @@ browser-relay fix        # Restart and clear stale session state (when tabs won'
 browser-relay update     # Update the global package and refresh the service
 browser-relay status     # Show service state and HTTP health
 browser-relay doctor     # Run a complete read-only installation diagnosis
-browser-relay logs       # Tail /tmp/browser-relay.log
+browser-relay logs       # Follow the platform service logs
 browser-relay path       # Print the Chrome extension directory
 browser-relay skill install --agent codex # Install/update and verify the Agent Skill
 browser-relay skill path                  # Print the bundled Skill directory
@@ -339,9 +341,20 @@ Service files:
 ```text
 macOS: ~/Library/LaunchAgents/org.browser-relay.service.plist
 Linux: ~/.config/systemd/user/browser-relay.service
+Windows task: BrowserRelay
+Windows definition: %LOCALAPPDATA%\BrowserRelay\task.xml
 ```
 
-Logs: `/tmp/browser-relay.log`, `/tmp/browser-relay.error.log`
+Logs:
+
+```text
+macOS: /tmp/browser-relay.log, /tmp/browser-relay.error.log
+Linux: journalctl --user -u browser-relay
+Windows: %LOCALAPPDATA%\BrowserRelay\logs\browser-relay.log
+         %LOCALAPPDATA%\BrowserRelay\logs\browser-relay.error.log
+```
+
+On Windows, `uninstall` removes only the Browser Relay scheduled task and its generated XML definition. It preserves logs for diagnosis and never kills an unrelated process that happens to use port `18795`.
 
 ### Hiding the "debugging this browser" infobar
 

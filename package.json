@@ -38,7 +38,7 @@
     "sync-version": "node scripts/sync-version.mjs",
     "prepublishOnly": "node scripts/sync-version.mjs",
     "postinstall": "node server/install.js",
-    "postuninstall": "node server/uninstall.js 2>/dev/null || true"
+    "postuninstall": "node server/uninstall.js"
   },
   "keywords": [
     "agent-skill",
