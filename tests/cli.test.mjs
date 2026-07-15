@@ -65,6 +65,37 @@ test('CLI --json preserves structured relay errors on failure', async (t) => {
   assert.equal(payload.status, 404);
 });
 
+test('wait CLI sends stable options and prints a compact success', async (t) => {
+  let received = null;
+  const relay = await startFakeRelay(t, async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk.toString();
+    received = { method: req.method, url: req.url, body: JSON.parse(raw) };
+    const body = JSON.stringify({
+      ok: true,
+      matched: true,
+      selector: '.ready',
+      state: 'attached',
+      elapsedMs: 75,
+      attempts: 2,
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+    res.end(body);
+  });
+
+  const result = await runCli(t, relay.port, [
+    'wait', '.ready', '--state', 'attached', '--timeout', '2500', '--poll', '75', '--tab', 'tab-1',
+  ]);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'Matched attached: .ready (75ms, 2 attempts)');
+  assert.deepEqual(received, {
+    method: 'POST',
+    url: '/api/wait',
+    body: { selector: '.ready', state: 'attached', timeoutMs: 2500, pollMs: 75, tabId: 'tab-1' },
+  });
+});
+
 test('doctor reports a ready end-to-end browser path as structured JSON', async (t) => {
   const relay = await startFakeRelay(t, (req, res) => {
     assert.equal(req.url, '/api/debug');

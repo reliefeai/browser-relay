@@ -149,6 +149,7 @@ Browser Relay is designed to be comfortable for agents, not just low-level autom
 - The included Skill tells agents when to use Browser Relay and how to interact safely.
 - Page snapshots are annotated with links, buttons, inputs, and other interactive elements so agents can plan before acting.
 - Actions target existing attached tabs, keeping the user's browser context visible and predictable.
+- Stable CSS waits let agents wait for an element to attach or become visible instead of guessing with fixed sleeps.
 - Console and network capture record `console.*`, page exceptions, log entries, and request/response activity for debugging real-page behavior.
 
 ## CLI
@@ -160,6 +161,7 @@ browser-relay tabs
 browser-relay console --tab ABC123 --limit 50
 browser-relay network --tab ABC123 --type response --status 500
 browser-relay snapshot --tab ABC123 --max-length 20000
+browser-relay wait 'button[type=submit]' --state visible --timeout 10000 --tab ABC123
 browser-relay click 'button[type=submit]' --tab ABC123
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
 browser-relay key Control+L
@@ -221,6 +223,7 @@ browser-relay tabs       # List attached browser tabs
 browser-relay console    # Print captured console/page errors
 browser-relay network    # Print captured network requests/responses/failures
 browser-relay snapshot   # Print annotated page text
+browser-relay wait       # Wait for a CSS selector to attach or become visible
 browser-relay click      # Click an element by CSS selector
 browser-relay type       # Type text into the page
 browser-relay key        # Press a key or shortcut
@@ -251,7 +254,7 @@ After installing the npm package, use `browser-relay-mcp` directly:
 }
 ```
 
-The MCP server exposes high-level tools such as `browser_tabs`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_key`, and `browser_screenshot`.
+The MCP server exposes high-level tools such as `browser_tabs`, `browser_snapshot`, `browser_wait`, `browser_click`, `browser_type`, `browser_key`, and `browser_screenshot`.
 
 ## HTTP API
 
@@ -269,6 +272,11 @@ curl http://127.0.0.1:18795/api/tabs
 
 # Take a text snapshot of a page
 curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123"
+
+# Wait until an element is visible (attached is also supported)
+curl -X POST http://127.0.0.1:18795/api/wait \
+  -H "Content-Type: application/json" \
+  -d '{"tabId":"ABC123","selector":"button.submit","state":"visible","timeoutMs":10000}'
 
 # Read captured console/page errors
 curl "http://127.0.0.1:18795/api/console?tabId=ABC123&limit=50"
@@ -293,6 +301,7 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/network/clear` | POST | Clear captured network entries |
 | `/api/navigate` | POST | Navigate an attached tab |
 | `/api/snapshot` | GET | Get annotated text or raw HTML |
+| `/api/wait` | POST | Wait for a CSS selector to attach or become visible |
 | `/api/click` | POST | Click an element by CSS selector |
 | `/api/type` | POST | Type into an input |
 | `/api/key` | POST | Press a key or keyboard shortcut |

@@ -236,6 +236,22 @@ const TOOLS = [
     },
   },
   {
+    name: "browser_wait",
+    description: "Wait for a CSS selector to be attached to the DOM or become visible. Use this after navigation or an action instead of fixed sleeps.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector to wait for" },
+        state: { type: "string", enum: ["attached", "visible"], description: "Condition to wait for (default: visible)" },
+        timeoutMs: { type: "integer", minimum: 1, maximum: 20000, description: "Timeout in milliseconds (default: 5000)" },
+        pollMs: { type: "integer", minimum: 50, maximum: 1000, description: "Polling interval in milliseconds (default: 100)" },
+        tabId: { type: "string", description: "Tab targetId (optional, defaults to most recent)" },
+      },
+      required: ["selector"],
+    },
+    handler: async (args) => relayPost("/api/wait", args),
+  },
+  {
     name: "browser_click",
     description: "Click an element on the page by CSS selector. Scrolls the element into view first. Returns the text of the clicked element.",
     inputSchema: {

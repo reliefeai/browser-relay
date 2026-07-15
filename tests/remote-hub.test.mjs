@@ -52,7 +52,10 @@ function connectDevice(t, hubPort, routeId, secret, responseBody) {
   ws.on('message', (raw) => {
     const msg = JSON.parse(String(raw));
     if (msg.type === 'rpc.request') {
-      ws.send(JSON.stringify({ type: 'rpc.response', id: msg.id, status: 200, headers: { 'content-type': 'application/json' }, body: responseBody }));
+      const response = typeof responseBody === 'function' ? responseBody(msg) : responseBody;
+      const status = response?.status ?? 200;
+      const body = response?.body ?? response;
+      ws.send(JSON.stringify({ type: 'rpc.response', id: msg.id, status, headers: { 'content-type': 'application/json' }, body }));
     }
   });
   return new Promise((resolve, reject) => {
@@ -109,4 +112,70 @@ test('remote CLI preserves structured hub errors when device is offline', async 
   assert.equal(payload.ok, false);
   assert.equal(payload.code, 'remote_device_offline');
   assert.equal(payload.status, 409);
+});
+
+test('remote CLI routes wait options to the extension executor', async (t) => {
+  const hubPort = await getFreePort();
+  await startHub(t, hubPort);
+  let request = null;
+  await connectDevice(t, hubPort, ROUTE_ID, SECRET, (msg) => {
+    request = msg;
+    return { ok: true, matched: true, selector: '.ready', state: 'attached', elapsedMs: 75, attempts: 2 };
+  });
+  const hub = `http://127.0.0.1:${hubPort}`;
+  await waitFor(async () => {
+    const res = await fetch(`${hub}/v1/status/${ROUTE_ID}`, { headers: { Authorization: `Bearer ${SECRET}` } });
+    return (await res.json()).connected;
+  });
+
+  const result = await runCli(t, [
+    'wait', '.ready', '--state', 'attached', '--timeout', '2500', '--poll', '75', '--json',
+    '--remote-device-id', DEVICE_ID, '--remote-host', hub,
+  ]);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).matched, true);
+  assert.equal(request.method, 'POST');
+  assert.equal(request.path, '/api/wait');
+  assert.deepEqual(request.body, {
+    selector: '.ready',
+    state: 'attached',
+    timeoutMs: 2500,
+    pollMs: 75,
+  });
+});
+
+test('remote CLI preserves extension wait_timeout details', async (t) => {
+  const hubPort = await getFreePort();
+  await startHub(t, hubPort);
+  await connectDevice(t, hubPort, ROUTE_ID, SECRET, {
+    status: 408,
+    body: {
+      ok: false,
+      code: 'wait_timeout',
+      error: 'Timed out waiting for selector: #never',
+      message: 'Timed out waiting for selector: #never',
+      status: 408,
+      retryable: true,
+      details: { selector: '#never', state: 'visible', timeoutMs: 100, elapsedMs: 101, attempts: 3 },
+    },
+  });
+  const hub = `http://127.0.0.1:${hubPort}`;
+  await waitFor(async () => {
+    const res = await fetch(`${hub}/v1/status/${ROUTE_ID}`, { headers: { Authorization: `Bearer ${SECRET}` } });
+    return (await res.json()).connected;
+  });
+
+  const result = await runCli(t, [
+    'wait', '#never', '--timeout', '100', '--json',
+    '--remote-device-id', DEVICE_ID, '--remote-host', hub,
+  ]);
+
+  assert.equal(result.code, 1);
+  assert.equal(result.stderr.trim(), '');
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.code, 'wait_timeout');
+  assert.equal(payload.status, 408);
+  assert.equal(payload.retryable, true);
+  assert.equal(payload.details.attempts, 3);
 });

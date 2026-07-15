@@ -206,6 +206,161 @@ test('click keeps trusted CDP mouse events for a visible tab', async (t) => {
   );
 });
 
+test('wait polls until a CSS selector becomes visible', async (t) => {
+  const relay = await startRelay(t);
+  let checks = 0;
+  const extension = await connectFakeExtension(t, relay.port, (cmd) => {
+    if (cmd.method === 'Runtime.evaluate' && cmd.params.expression.includes('__browserRelayWait')) {
+      checks += 1;
+      return {
+        result: {
+          value: {
+            matched: checks >= 3,
+            matchCount: checks >= 2 ? 1 : 0,
+            visibleCount: checks >= 3 ? 1 : 0,
+          },
+        },
+      };
+    }
+    return {};
+  });
+
+  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
+
+  const { status, body } = await fetchJson(relay.port, '/api/wait', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      tabId: 'tab-1',
+      selector: 'button.submit',
+      state: 'visible',
+      timeoutMs: 1000,
+      pollMs: 50,
+    }),
+  });
+
+  assert.equal(status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.matched, true);
+  assert.equal(body.selector, 'button.submit');
+  assert.equal(body.state, 'visible');
+  assert.equal(body.attempts, 3);
+  assert.equal(body.matchCount, 1);
+  assert.equal(body.visibleCount, 1);
+  assert.ok(body.elapsedMs >= 90);
+});
+
+test('wait timeout is a structured retryable HTTP 408', async (t) => {
+  const relay = await startRelay(t);
+  const extension = await connectFakeExtension(t, relay.port, (cmd) => {
+    if (cmd.method === 'Runtime.evaluate' && cmd.params.expression.includes('__browserRelayWait')) {
+      return { result: { value: { matched: false, matchCount: 0, visibleCount: 0 } } };
+    }
+    return {};
+  });
+
+  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
+
+  const { status, body } = await fetchJson(relay.port, '/api/wait', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tabId: 'tab-1', selector: '#never', timeoutMs: 120, pollMs: 50 }),
+  });
+
+  assert.equal(status, 408);
+  assert.equal(body.ok, false);
+  assert.equal(body.code, 'wait_timeout');
+  assert.equal(body.retryable, true);
+  assert.equal(body.status, 408);
+  assert.equal(body.details.selector, '#never');
+  assert.equal(body.details.state, 'visible');
+  assert.equal(body.details.timeoutMs, 120);
+  assert.ok(body.details.attempts >= 3);
+  assert.ok(body.details.elapsedMs >= 120);
+});
+
+test('wait validates options before requiring an extension', async (t) => {
+  const relay = await startRelay(t);
+
+  const invalidState = await fetchJson(relay.port, '/api/wait', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ selector: '#ready', state: 'hidden' }),
+  });
+  assert.equal(invalidState.status, 400);
+  assert.equal(invalidState.body.code, 'invalid_request');
+  assert.deepEqual(invalidState.body.details, { field: 'state' });
+
+  const invalidTimeout = await fetchJson(relay.port, '/api/wait', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ selector: '#ready', timeoutMs: 20001 }),
+  });
+  assert.equal(invalidTimeout.status, 400);
+  assert.deepEqual(invalidTimeout.body.details, { field: 'timeoutMs' });
+});
+
+test('wait returns invalid_selector immediately for malformed CSS', async (t) => {
+  const relay = await startRelay(t);
+  const extension = await connectFakeExtension(t, relay.port, (cmd) => {
+    if (cmd.method === 'Runtime.evaluate' && cmd.params.expression.includes('__browserRelayWait')) {
+      return { result: { value: { matched: false, invalidSelector: true, message: 'Invalid selector' } } };
+    }
+    return {};
+  });
+  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
+
+  const { status, body } = await fetchJson(relay.port, '/api/wait', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tabId: 'tab-1', selector: '[', timeoutMs: 1000 }),
+  });
+
+  assert.equal(status, 400);
+  assert.equal(body.code, 'invalid_selector');
+  assert.equal(body.retryable, false);
+  assert.deepEqual(body.details, { selector: '[' });
+});
+
+test('wait does not turn tab detach or evaluation errors into a timeout', async (t) => {
+  const relay = await startRelay(t);
+  let extension;
+  let mode = 'detach';
+  extension = await connectFakeExtension(t, relay.port, (cmd) => {
+    if (cmd.method !== 'Runtime.evaluate' || !cmd.params.expression.includes('__browserRelayWait')) return {};
+    if (mode === 'detach') {
+      extension.sendEvent('session-1', 'Target.detachedFromTarget', { sessionId: 'session-1', targetId: 'tab-1' });
+      return { result: { value: { matched: false, matchCount: 0, visibleCount: 0 } } };
+    }
+    throw new Error('Execution context was destroyed');
+  });
+
+  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
+  const detached = await fetchJson(relay.port, '/api/wait', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tabId: 'tab-1', selector: '#ready', timeoutMs: 1000, pollMs: 50 }),
+  });
+  assert.equal(detached.status, 404);
+  assert.equal(detached.body.code, 'tab_not_found');
+
+  mode = 'error';
+  extension.announceTab({ sessionId: 'session-2', targetId: 'tab-2' });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
+  const evaluation = await fetchJson(relay.port, '/api/wait', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tabId: 'tab-2', selector: '#ready', timeoutMs: 1000, pollMs: 50 }),
+  });
+  assert.equal(evaluation.status, 409);
+  assert.equal(evaluation.body.code, 'wait_evaluation_failed');
+  assert.equal(evaluation.body.retryable, true);
+});
+
 test('network events are captured, filterable, clearable, and redact sensitive headers', async (t) => {
   const relay = await startRelay(t);
   const extension = await connectFakeExtension(t, relay.port);

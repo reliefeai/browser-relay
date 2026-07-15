@@ -2,6 +2,7 @@
 // Core logic adapted from openclaw auto-attach fork, stripped of gateway handshake
 
 import { SNAPSHOT_JS } from './snapshot.js'
+import { buildWaitExpression, normalizeWaitOptions } from './wait.js'
 
 const DEFAULT_PORT = 18795
 const DEFAULT_REMOTE_HOST = 'https://relay.linso.ai'
@@ -966,7 +967,7 @@ async function ensureRemoteHubConnection() {
       version: chrome.runtime.getManifest().version,
       routeId: cfg.remoteRouteId,
       deviceName: 'Browser Relay',
-      capabilities: ['tabs', 'eval', 'snapshot', 'click', 'type', 'key', 'scroll', 'navigate', 'screenshot', 'console', 'network'],
+      capabilities: ['tabs', 'eval', 'wait', 'snapshot', 'click', 'type', 'key', 'scroll', 'navigate', 'screenshot', 'console', 'network'],
     }))
 
     ws.onclose = () => { if (ws !== remoteWs) return; onRemoteHubClosed('closed') }
@@ -1038,8 +1039,19 @@ async function handleHubMessage(text) {
 // ---- Remote command executor: run the CLI's /api/* semantics inside the
 // extension using chrome.debugger directly (no Node relay in the loop). ----
 
-function apiError(code, message, status = 400) {
-  return { status, body: { ok: false, code, error: message, message } }
+function apiError(code, message, status = 400, retryable = false, details) {
+  return {
+    status,
+    body: {
+      ok: false,
+      code,
+      error: message,
+      message,
+      status,
+      retryable,
+      ...(details === undefined ? {} : { details }),
+    },
+  }
 }
 
 // Resolve the CLI's tabId param (chrome tab id, or legacy CDP targetId) to a
@@ -1082,6 +1094,7 @@ async function executeRemoteApi(method, path, body) {
 
   if (method === 'GET' && p === '/api/tabs') return { status: 200, body: await apiListTabs() }
   if (method === 'POST' && p === '/api/eval') return { status: 200, body: await apiEval(payload, u.searchParams) }
+  if (method === 'POST' && p === '/api/wait') return await apiWait(payload)
   if (method === 'POST' && p === '/api/navigate') return { status: 200, body: await apiNavigate(payload) }
   if (method === 'POST' && p === '/api/click') return { status: 200, body: await apiClick(payload) }
   if (method === 'POST' && p === '/api/type') return { status: 200, body: await apiType(payload) }
@@ -1124,6 +1137,92 @@ function elementNotFound(selector) {
 async function evalValue(tabId, expression) {
   const r = await remoteCdp(tabId, 'Runtime.evaluate', { expression, returnByValue: true })
   return r?.result?.value
+}
+
+async function apiWait(body) {
+  const options = normalizeWaitOptions(body)
+  if (!options.ok) return apiError('invalid_request', options.message, 400, false, { field: options.field })
+
+  let tabId
+  try {
+    tabId = await resolveRemoteTabId(options.tabId)
+  } catch (error) {
+    return apiError('tab_not_found', error instanceof Error ? error.message : String(error), 404)
+  }
+
+  const expression = buildWaitExpression(options.selector, options.state)
+  const startedAt = Date.now()
+  let attempts = 0
+
+  while (true) {
+    try {
+      await chrome.tabs.get(tabId)
+    } catch {
+      return apiError('tab_not_found', `The target tab was closed while waiting: ${tabId}`, 404, false, { tabId })
+    }
+
+    attempts += 1
+    let evaluation
+    try {
+      evaluation = await evalValue(tabId, expression)
+    } catch (error) {
+      return apiError(
+        'wait_evaluation_failed',
+        error instanceof Error ? error.message : String(error),
+        409,
+        true,
+        { selector: options.selector, state: options.state },
+      )
+    }
+
+    if (!evaluation || typeof evaluation !== 'object') {
+      return apiError(
+        'wait_evaluation_failed',
+        'The page returned an invalid wait result',
+        409,
+        true,
+        { selector: options.selector, state: options.state },
+      )
+    }
+    if (evaluation.invalidSelector) {
+      return apiError('invalid_selector', `Invalid CSS selector: ${options.selector}`, 400, false, { selector: options.selector })
+    }
+
+    const elapsedMs = Date.now() - startedAt
+    if (evaluation.matched === true) {
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          matched: true,
+          selector: options.selector,
+          state: options.state,
+          elapsedMs,
+          attempts,
+          matchCount: evaluation.matchCount ?? null,
+          visibleCount: evaluation.visibleCount ?? null,
+        },
+      }
+    }
+
+    if (elapsedMs >= options.timeoutMs) {
+      return apiError(
+        'wait_timeout',
+        `Timed out waiting for selector: ${options.selector}`,
+        408,
+        true,
+        {
+          selector: options.selector,
+          state: options.state,
+          timeoutMs: options.timeoutMs,
+          elapsedMs,
+          attempts,
+        },
+      )
+    }
+
+    await sleep(Math.min(options.pollMs, options.timeoutMs - elapsedMs))
+  }
 }
 
 async function apiNavigate(body) {

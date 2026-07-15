@@ -47,3 +47,15 @@ test('remote click falls back to DOM click when the controlled tab is in the bac
   assert.match(background, /visibility === 'hidden'[\s\S]*el\.click\(\)[\s\S]*strategy: 'dom'/);
   assert.match(background, /strategy: 'mouse'/);
 });
+
+test('remote extension executor exposes the same wait contract as the local relay', () => {
+  const background = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf-8');
+
+  assert.match(background, /import \{ buildWaitExpression, normalizeWaitOptions \} from '\.\/wait\.js'/);
+  assert.match(background, /capabilities: \[[^\]]*'wait'/);
+  assert.match(background, /p === '\/api\/wait'\) return await apiWait\(payload\)/);
+  assert.match(background, /async function apiWait\s*\(body\)\s*{/);
+  assert.match(background, /'wait_timeout'[\s\S]*408[\s\S]*true/);
+  assert.match(background, /'tab_not_found'/);
+  assert.match(background, /'wait_evaluation_failed'/);
+});

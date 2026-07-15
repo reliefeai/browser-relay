@@ -140,6 +140,7 @@ Browser Relay 专门为 Agent 工作流做了设计,不只是给底层脚本用:
 - 自带 Skill,告诉 Agent 何时用 Browser Relay 以及如何安全交互。
 - 页面快照会标注链接、按钮、输入框等交互元素,方便 Agent 先理解页面再行动。
 - 操作落在已附加的真实标签页上,让浏览器上下文保持可见、可预期。
+- 稳定 CSS 等待让 Agent 等元素进入 DOM 或变为可见，不再依赖猜测性的固定 sleep。
 - Console 和 Network 捕获会记录 `console.*`、页面异常、日志以及请求/响应,便于诊断真实页面行为。
 
 ## CLI
@@ -151,6 +152,7 @@ browser-relay tabs
 browser-relay console --tab ABC123 --limit 50
 browser-relay network --tab ABC123 --type response --status 500
 browser-relay snapshot --tab ABC123 --max-length 20000
+browser-relay wait 'button[type=submit]' --state visible --timeout 10000 --tab ABC123
 browser-relay click 'button[type=submit]' --tab ABC123
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
 browser-relay key Control+L
@@ -212,6 +214,7 @@ browser-relay tabs       # 列出已附加标签页
 browser-relay console    # 输出 console 和页面错误记录
 browser-relay network    # 输出网络请求、响应和失败事件
 browser-relay snapshot   # 输出页面结构化文本
+browser-relay wait       # 等待 CSS 元素进入 DOM 或变为可见
 browser-relay click      # 按 CSS selector 点击元素
 browser-relay type       # 输入文本
 browser-relay key        # 按键或快捷键
@@ -242,7 +245,7 @@ browser-relay api-help   # 查看浏览器操作命令示例
 }
 ```
 
-MCP server 提供 `browser_tabs`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_key`、`browser_screenshot` 等高层工具。
+MCP server 提供 `browser_tabs`、`browser_snapshot`、`browser_wait`、`browser_click`、`browser_type`、`browser_key`、`browser_screenshot` 等高层工具。
 
 ## HTTP API
 
@@ -257,6 +260,11 @@ HTTP、CLI `--json` 和 MCP 工具错误都使用结构化错误格式:
 ```bash
 curl http://127.0.0.1:18795/api/tabs
 curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123"
+
+curl -X POST http://127.0.0.1:18795/api/wait \
+  -H "Content-Type: application/json" \
+  -d '{"tabId":"ABC123","selector":"button.submit","state":"visible","timeoutMs":10000}'
+
 curl "http://127.0.0.1:18795/api/console?tabId=ABC123&limit=50"
 curl "http://127.0.0.1:18795/api/network?tabId=ABC123&type=response&status=500"
 
@@ -276,6 +284,7 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/network/clear` | POST | 清理已捕获的网络事件 |
 | `/api/navigate` | POST | 导航已附加标签页 |
 | `/api/snapshot` | GET | 获取页面文本快照或 HTML |
+| `/api/wait` | POST | 等待 CSS 元素进入 DOM 或变为可见 |
 | `/api/click` | POST | 按 CSS selector 点击元素 |
 | `/api/type` | POST | 输入文本 |
 | `/api/key` | POST | 按键或键盘快捷键 |

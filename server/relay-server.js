@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 import { SNAPSHOT_JS } from "./snapshot.js";
+import { buildWaitExpression, normalizeWaitOptions } from "../extension/wait.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -809,6 +810,95 @@ async function handleSnapshot(req, res) {
   jsonResponse(res, 200, { ok: true, url: urlResult?.result?.value || "", title: titleResult?.result?.value || "", snapshot, truncated });
 }
 
+async function handleWait(req, res) {
+  const body = await readBody(req);
+  const options = normalizeWaitOptions(body);
+  if (!options.ok) {
+    throw new ApiError(400, "invalid_request", options.message, {
+      details: { field: options.field },
+    });
+  }
+
+  await ensureExtension();
+  const sessionId = resolveTab(options.tabId);
+  const expression = buildWaitExpression(options.selector, options.state);
+  const startedAt = Date.now();
+  let attempts = 0;
+
+  while (true) {
+    if (!connectedTargets.has(sessionId)) {
+      throw new ApiError(404, "tab_not_found", "The target tab was detached while waiting", {
+        details: { tabId: options.tabId ?? null },
+      });
+    }
+
+    attempts += 1;
+    let result;
+    try {
+      result = await sendToExtension("Runtime.evaluate", {
+        expression,
+        returnByValue: true,
+        awaitPromise: false,
+      }, sessionId);
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(409, "wait_evaluation_failed", error instanceof Error ? error.message : String(error), {
+        retryable: true,
+        details: { selector: options.selector, state: options.state },
+      });
+    }
+
+    if (result?.exceptionDetails) {
+      throw new ApiError(409, "wait_evaluation_failed", "The page could not evaluate the wait condition", {
+        retryable: true,
+        details: { selector: options.selector, state: options.state },
+      });
+    }
+
+    const evaluation = result?.result?.value;
+    if (!evaluation || typeof evaluation !== "object") {
+      throw new ApiError(409, "wait_evaluation_failed", "The page returned an invalid wait result", {
+        retryable: true,
+        details: { selector: options.selector, state: options.state },
+      });
+    }
+    if (evaluation.invalidSelector) {
+      throw new ApiError(400, "invalid_selector", `Invalid CSS selector: ${options.selector}`, {
+        details: { selector: options.selector },
+      });
+    }
+
+    const elapsedMs = Date.now() - startedAt;
+    if (evaluation.matched === true) {
+      return jsonResponse(res, 200, {
+        ok: true,
+        matched: true,
+        selector: options.selector,
+        state: options.state,
+        elapsedMs,
+        attempts,
+        matchCount: evaluation.matchCount ?? null,
+        visibleCount: evaluation.visibleCount ?? null,
+      });
+    }
+
+    if (elapsedMs >= options.timeoutMs) {
+      throw new ApiError(408, "wait_timeout", `Timed out waiting for selector: ${options.selector}`, {
+        retryable: true,
+        details: {
+          selector: options.selector,
+          state: options.state,
+          timeoutMs: options.timeoutMs,
+          elapsedMs,
+          attempts,
+        },
+      });
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, Math.min(options.pollMs, options.timeoutMs - elapsedMs)));
+  }
+}
+
 async function handleClick(req, res) {
   const body = await readBody(req);
   const selector = body.selector;
@@ -1075,6 +1165,7 @@ const server = createServer(async (req, res) => {
       "POST /api/network/clear": handleNetworkClear,
       "POST /api/navigate": handleNavigate,
       "POST /api/eval": handleEval,
+      "POST /api/wait": handleWait,
       "GET /api/snapshot": handleSnapshot,
       "POST /api/click": handleClick,
       "POST /api/type": handleType,

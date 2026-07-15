@@ -67,6 +67,7 @@ browser-relay tabs
 browser-relay console --tab <tabId> --limit 50
 browser-relay network --tab <tabId> --type response --status 500 --limit 20
 browser-relay snapshot --tab <tabId> --max-length 20000
+browser-relay wait 'button[type=submit]' --state visible --timeout 10000 --tab <tabId>
 browser-relay click 'button[type=submit]' --tab <tabId>
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --tab <tabId>
 browser-relay key Control+L --tab <tabId>
@@ -146,6 +147,24 @@ Get a text representation of the current page (interactive elements annotated).
 GET http://127.0.0.1:18795/api/snapshot?tabId=<id>&format=text&maxLength=100000
 ```
 Format can be `"text"` (annotated DOM) or `"html"` (raw HTML).
+
+### 3b. browser_wait
+Wait for a CSS selector to be attached to the DOM or become visible. Prefer
+this over fixed sleeps after navigation or actions.
+```
+POST http://127.0.0.1:18795/api/wait
+Body: {
+  "selector": "button.submit",
+  "state?": "attached|visible",
+  "timeoutMs?": 5000,
+  "pollMs?": 100,
+  "tabId?": "..."
+}
+```
+`state` defaults to `visible`. `timeoutMs` accepts 1–20000 and `pollMs`
+accepts 50–1000. A timeout returns `code: "wait_timeout"` with
+`retryable: true`; a tab closing or the extension disconnecting fails
+immediately instead of waiting for the timeout.
 
 ### 4. browser_click
 Click an element by CSS selector. Scrolls into view first, uses real mouse events.
@@ -241,11 +260,12 @@ When asked to do something with a web page:
 3. **`browser-relay snapshot`** — understand the page structure
 4. **Plan actions** based on snapshot (click what, type where)
 5. **Execute** (`browser-relay click`, `browser-relay type`, `browser-relay key`, `browser-relay scroll`) one at a time
-6. **`browser-relay console`** if the page behaves unexpectedly or after risky actions
-7. **`browser-relay network`** if a request fails, hangs, or the UI changes without visible errors
-8. **Re-snapshot** after each action to verify state
-9. **Use `browser-relay download-start` and `browser-relay downloads`** for real file downloads
-10. **Screenshot** if visual confirmation is needed
+6. **`browser-relay wait`** for the next expected element after navigation or an action; do not guess with fixed sleeps
+7. **`browser-relay console`** if the page behaves unexpectedly or after risky actions
+8. **`browser-relay network`** if a request fails, hangs, or the UI changes without visible errors
+9. **Re-snapshot** after each action to verify state
+10. **Use `browser-relay download-start` and `browser-relay downloads`** for real file downloads
+11. **Screenshot** if visual confirmation is needed
 
 ## Example Session
 
@@ -262,10 +282,13 @@ browser-relay snapshot --tab ABC123
 # 3. Type into the search box
 browser-relay type 'browser relay' --selector 'input[name=q]' --submit --tab ABC123
 
-# 4. New snapshot after navigation
+# 4. Wait for results instead of sleeping
+browser-relay wait 'a[href*="github.com"]' --state visible --timeout 10000 --tab ABC123
+
+# 5. New snapshot after navigation
 browser-relay snapshot --tab ABC123
 
-# 5. Click a result
+# 6. Click a result
 browser-relay click 'a[href*="github.com"]' --tab ABC123
 ```
 
@@ -293,6 +316,7 @@ Add to your MCP config (`~/.claude/mcp.json` or equivalent):
 | Extension not connected | Relay server is running but no browser extension connected | Check that Chrome is running with the Browser Relay extension installed |
 | No attached tabs | Extension connected but no tab is attached | The extension auto-attaches all regular tabs. Make sure at least one non-chrome:// tab is open |
 | Element not found: selector | The CSS selector did not match anything on the page | Try a different selector, or take a snapshot first to inspect the DOM |
+| wait_timeout | The selector did not reach the requested attached/visible state before timeout | Re-snapshot the page, check the selector, or retry when the page is expected to load more slowly |
 | Session with given id not found (-32001) | The relay holds stale session state (e.g. after an extension reload) | Run `browser-relay fix` — restarts the relay and clears stale sessions; the extension reconnects automatically |
 
 ## Health Check

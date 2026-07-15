@@ -703,6 +703,7 @@ Commands:
 Browser commands:
   tabs        List attached Chrome tabs
   snapshot    Print annotated page text
+  wait        Wait for a CSS selector to attach or become visible
   console     Print captured console, page error, and browser log entries
   network     Print captured Network.* request/response/failure entries
   click       Click an element by CSS selector
@@ -1179,6 +1180,22 @@ async function browserApiCommand(cmd, args) {
       console.log(data.html ?? data.snapshot ?? "");
       return;
     }
+    case "wait": {
+      const selector = requireValue(flagValue(flags, "selector") || positional.join(" "), "selector is required");
+      const timeoutMs = flagValue(flags, "timeout", "timeout-ms", "timeoutMs");
+      const pollMs = flagValue(flags, "poll", "poll-ms", "pollMs");
+      const data = await relayRequest("POST", "/api/wait", {
+        selector,
+        state: flagValue(flags, "state") || "visible",
+        timeoutMs: timeoutMs === undefined ? undefined : Number(timeoutMs),
+        pollMs: pollMs === undefined ? undefined : Number(pollMs),
+        tabId: tabIdFrom(flags),
+      });
+      ensureOk(data, json);
+      if (json) return printData(data, true);
+      console.log(`Matched ${data.state}: ${data.selector} (${data.elapsedMs}ms, ${data.attempts} attempt${data.attempts === 1 ? "" : "s"})`);
+      return;
+    }
     case "click": {
       const selector = requireValue(flagValue(flags, "selector") || positional.join(" "), "selector is required");
       const data = await relayRequest("POST", "/api/click", {
@@ -1328,6 +1345,7 @@ function apiHelp() {
   network [--tab id]           Print captured network events
   navigate <url> [--tab id]    Navigate an attached tab
   snapshot [--tab id]          Print annotated page text
+  wait <selector>              Wait for a selector (visible by default)
   click <selector>             Click a CSS selector
   type <text>                  Type text into the focused element
   key <key|combo>              Press a key or combo (Enter, Escape, Control+L)
@@ -1345,7 +1363,10 @@ Common flags:
   --remote-host <url>          Remote hub URL (default https://relay.linso.ai)
   --level <level>              Filter console entries by level
   --limit <n>                  Limit console entries
-  --selector, -s <css>         Selector for click/type/download
+  --selector, -s <css>         Selector for wait/click/type/download
+  --state <attached|visible>   Wait condition (default: visible)
+  --timeout <ms>               Wait timeout (default: 5000, max: 20000)
+  --poll <ms>                  Wait polling interval (default: 100)
   --filename <path>            Suggested download filename/path
   --save-as                    Ask Chrome to show the save-as dialog
   --conflict-action <action>   uniquify, overwrite, or prompt
@@ -1356,6 +1377,7 @@ Examples:
   browser-relay console --limit 50
   browser-relay network --type response --status 500 --limit 20
   browser-relay snapshot --tab ABC123 --max-length 20000
+  browser-relay wait 'button[type=submit]' --state visible --timeout 10000
   browser-relay click 'button[type=submit]'
   browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
   browser-relay key Control+L
@@ -1399,6 +1421,7 @@ switch (cmd) {
   case "go":
   case "open":
   case "snapshot":
+  case "wait":
   case "click":
   case "type":
   case "key":
