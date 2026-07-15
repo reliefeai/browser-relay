@@ -12,23 +12,26 @@
   <a href="https://www.npmjs.com/package/@linsoai/browser-relay"><img src="https://img.shields.io/npm/v/@linsoai/browser-relay.svg" alt="npm version"></a>
   <a href="https://www.npmjs.com/package/@linsoai/browser-relay"><img src="https://img.shields.io/npm/dm/@linsoai/browser-relay.svg" alt="npm downloads"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
-  <img src="https://img.shields.io/badge/MCP-ready-blue" alt="MCP ready">
+  <img src="https://img.shields.io/badge/agent-Skill%20%2B%20CLI-blue" alt="Agent Skill and CLI">
+  <img src="https://img.shields.io/badge/remote-multi--machine-7c3aed" alt="Remote multi-machine control">
   <img src="https://img.shields.io/badge/local--first-127.0.0.1-111827" alt="Local first">
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a>
   ·
+  <a href="#agent-friendly-by-default">Agent Skill</a>
+  ·
   <a href="#cli">CLI</a>
   ·
   <a href="#remote-control-remote-relay">Remote</a>
   ·
-  <a href="#http-api">HTTP API</a>
-  ·
   <a href="README.zh-CN.md">中文</a>
 </p>
 
-Browser Relay connects your real, logged-in Chrome to AI agents — over a plain CLI, MCP, or HTTP. Agents work inside the tabs you already have open, **locally or from another machine**, instead of a throwaway automation profile or a headless browser. No cloud browser, no separate automation window, no surprise tabs.
+Browser Relay lets an AI agent join the Chrome browser you already use through an agent-native **Skill + CLI**. It does not launch a blank automation profile, keep pulling another browser window to the foreground, or make you log in again. You and the agent work in the same everyday browser — locally or across multiple machines.
+
+Use it when the task lives in a browser that already has the right login, extensions, device trust, or network access: operate your desktop browser from an agent on your phone, reach an internal system through the already-authenticated browser on your work computer, or let one agent work across browsers on several machines.
 
 ## Real Chrome, not a throwaway profile
 
@@ -38,8 +41,8 @@ Browser Relay is that missing layer:
 
 - **Your actual Chrome session** — cookies, localStorage, extensions, and login state, shared as-is.
 - **No pop-up automation browser** — it never spawns a separate window or opens tabs behind your back; navigation reuses an attached tab.
-- **Local or remote** — drive the browser from this machine, or from anywhere through a public relay service (self-hostable on Cloudflare in one click), with no public port exposed.
-- **Agent-first** — a bundled Skill, an MCP server, and a simple HTTP API; works with Claude, Claude Code, Cursor, Windsurf, custom agents, and scripts.
+- **Local or remote** — one agent can drive browsers on this machine or several other machines through an outbound relay connection, with no public browser port exposed.
+- **Agent-first** — install the bundled Skill so Claude Code, Codex, Cursor, Windsurf, and other agents know when and how to use the inspectable CLI.
 - **Local-first boundary** — the relay binds to `127.0.0.1` by default.
 
 ## Provenance
@@ -50,7 +53,7 @@ Based on [chengyixu/openclaw-browser-relay](https://github.com/chengyixu/opencla
 
 ```text
 Local
-  AI Agent ──CLI / MCP / HTTP──▶ Relay server (Node, 127.0.0.1)
+  AI Agent ──Skill + CLI──▶ Relay server (Node, 127.0.0.1)
                                         │ WebSocket
                                         ▼
                                  Chrome extension ──chrome.debugger / CDP──▶ your Chrome tabs

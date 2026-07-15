@@ -9,18 +9,26 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Agent-Skill%20%2B%20CLI-blue" alt="Agent Skill 与 CLI">
+  <img src="https://img.shields.io/badge/远程-多机器控制-7c3aed" alt="远程多机器控制">
+  <img src="https://img.shields.io/badge/开源-MIT-green" alt="MIT 开源">
+</p>
+
+<p align="center">
   <a href="README.md">English</a>
   ·
   <a href="#快速开始">快速开始</a>
   ·
+  <a href="#agent-友好">Agent Skill</a>
+  ·
   <a href="#cli">CLI</a>
   ·
   <a href="#远程控制remote-relay">远程</a>
-  ·
-  <a href="#http-api">HTTP API</a>
 </p>
 
-Browser Relay 把你真实的、已登录的 Chrome 接到 AI Agent —— 通过简单的 CLI、MCP 或 HTTP。Agent 直接在你已经打开的标签页里工作,**在本地或从另一台机器上**,而不是用一个临时的自动化配置或无头浏览器。不启动云浏览器,不弹出额外的自动化窗口,不制造意外的新标签。
+Browser Relay 通过面向 Agent 的 **Skill + CLI**，让 AI Agent 加入你每天正在使用的 Chrome。它不会创建空白的自动化浏览器，不需要反复把另一个浏览器窗口拉到前台，也不用重新登录。你和 Agent 共用同一个日常浏览器——既可以在本机，也可以跨多台机器。
+
+它特别适合这些任务：人在外面用手机上的 Agent 操作电脑浏览器；在家里让 Agent 使用公司电脑上已有内网、SSO 和设备信任的 Chrome；或者让一个 Agent 根据登录态和网络环境，在多台机器的浏览器之间工作。
 
 ## 真实 Chrome,而非临时配置
 
@@ -30,8 +38,8 @@ Browser Relay 补的就是这一层(也是很多人在找的 OpenClaw Browser Re
 
 - **就是你自己的 Chrome 会话** —— Cookie、localStorage、扩展、登录状态,原样共用。
 - **不弹自动化浏览器** —— 不开额外窗口、不在背后建标签;普通导航复用已附加的标签页。
-- **本地或远程** —— 在本机控制,或通过公网 Relay 服务(可一键部署到 Cloudflare 自建)从任何地方控制,且不暴露任何公网端口。
-- **面向 Agent** —— 自带 Skill、MCP server、简单的 HTTP API;适配 Claude、Claude Code、Cursor、Windsurf、自定义 Agent 和脚本。
+- **本地或远程** —— 一个 Agent 可以操作本机或多台远程机器上的浏览器；浏览器通过出站连接接入，不暴露公网浏览器端口。
+- **面向 Agent** —— 安装自带 Skill 后，Claude Code、Codex、Cursor、Windsurf 等 Agent 会知道何时、如何调用可检查的 CLI。
 - **本地优先边界** —— 默认只监听 `127.0.0.1`。
 
 ## 来源说明
@@ -42,7 +50,7 @@ Browser Relay 补的就是这一层(也是很多人在找的 OpenClaw Browser Re
 
 ```text
 本地
-  AI Agent ──CLI / MCP / HTTP──▶ Relay 服务器 (Node, 127.0.0.1)
+  AI Agent ──Skill + CLI──▶ Relay 服务器 (Node, 127.0.0.1)
                                         │ WebSocket
                                         ▼
                                  Chrome 扩展 ──chrome.debugger / CDP──▶ 你的 Chrome 标签页
