@@ -31,5 +31,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit production dependencies
+        if: runner.os == 'Linux'
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Run tests
         run: npm test
