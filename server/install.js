@@ -121,6 +121,7 @@ function installWin32() {
 // the user to re-run the install command — the copies belong to the agent
 // tools, so we never overwrite them ourselves.
 const AGENT_SKILL_ROOTS = [
+  ".agents/skills",
   ".claude/skills",
   ".codex/skills",
   ".cursor/skills",
@@ -144,7 +145,7 @@ function checkInstalledSkills() {
   log("");
   log("⚠ Installed agent skill is out of date:");
   for (const dir of stale) log(`   ${dir}`);
-  log(`   Update it with: npx skills add "${join(RELAY_DIR, "skill")}" -g`);
+  log("   Run 'browser-relay skill help', then reinstall for codex, claude-code, or universal.");
 }
 
 function main() {

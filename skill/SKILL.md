@@ -84,6 +84,13 @@ For maintenance, upgrade Browser Relay with:
 browser-relay update
 ```
 
+Then refresh this Skill for the active agent (for example, `codex` or
+`claude-code`) and let Browser Relay verify the installed copy:
+
+```bash
+browser-relay skill install --agent codex
+```
+
 For long text or JavaScript, avoid shell escaping with stdin:
 
 ```bash

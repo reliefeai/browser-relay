@@ -117,13 +117,17 @@ ABC123    Example Domain    https://example.com/
 
 ### 4. 安装 Agent Skill 并完成第一个任务
 
-Browser Relay 自带 Agent Skill:
+Browser Relay 自带 Agent Skill。显式选择目标 Agent，安装过程就不会弹出交互式选择器：
 
 ```bash
-browser-relay skill
+browser-relay skill install --agent codex
+
+# Claude Code，或一次安装给两者：
+browser-relay skill install --agent claude-code
+browser-relay skill install --agent codex claude-code
 ```
 
-命令会输出一条 `npx skills ...` 安装命令,按提示安装到对应 Agent;也可以直接执行 `$(browser-relay skill)`。安装后就能让 Agent 操作你自己的浏览器,而不用另开自动化浏览器。
+命令会以无交互模式调用标准 `skills` CLI，并逐个读取目标 `SKILL.md` 做内容校验。使用标准 `~/.agents/skills` 目录的 Agent 可传 `--agent universal`；用 `browser-relay skill path` 查看包内 Skill 目录；无参数的 `browser-relay skill` 仍会输出兼容旧用法的 Codex 安装命令。安装后 Agent 就能操作你自己的浏览器，而不用另开自动化浏览器。
 
 第一次先给 Agent 一个只读的小任务：
 
@@ -206,7 +210,8 @@ browser-relay status     # 查看服务状态和 HTTP 健康检查
 browser-relay doctor     # 执行完整的只读安装诊断
 browser-relay logs       # 查看 /tmp/browser-relay.log
 browser-relay path       # 输出 Chrome 扩展目录
-browser-relay skill      # 输出 Skill 安装命令
+browser-relay skill install --agent codex # 安装/更新并校验 Agent Skill
+browser-relay skill path                  # 输出包内 Skill 目录
 browser-relay install    # 注册后台服务
 browser-relay uninstall  # 卸载后台服务
 

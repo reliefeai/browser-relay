@@ -5,11 +5,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, platform } from "node:os";
 import { DEFAULT_REMOTE_HOST, parseRemoteDeviceId, remoteHttpBase } from "./remote-protocol.js";
+import { runNpxSync } from "./npx-runner.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_DIR = dirname(__dirname);
 const EXTENSION_DIR = join(PKG_DIR, "extension");
-const SKILL_PATH = join(PKG_DIR, "skill/SKILL.md");
+const SKILL_DIR = join(PKG_DIR, "skill");
+const SKILL_PATH = join(SKILL_DIR, "SKILL.md");
 const LAUNCHD_LABEL = "org.browser-relay.service";
 const PLIST_PATH = join(homedir(), `Library/LaunchAgents/${LAUNCHD_LABEL}.plist`);
 const SYSTEMD_UNIT = "browser-relay";
@@ -187,6 +189,7 @@ async function status() {
 }
 
 const AGENT_SKILL_ROOTS = [
+  ".agents/skills",
   ".claude/skills",
   ".codex/skills",
   ".cursor/skills",
@@ -195,6 +198,22 @@ const AGENT_SKILL_ROOTS = [
   ".copilot/skills",
   ".config/opencode/skills",
 ];
+
+const SKILL_INSTALL_AGENTS = new Set(["codex", "claude-code", "universal"]);
+
+function inspectInstalledSkills(shippedSkill) {
+  const installations = [];
+  for (const root of AGENT_SKILL_ROOTS) {
+    const installedPath = join(homedir(), root, "browser-relay/SKILL.md");
+    if (!existsSync(installedPath)) continue;
+    let statusValue = "unreadable";
+    try {
+      statusValue = readFileSync(installedPath, "utf-8") === shippedSkill ? "current" : "outdated";
+    } catch {}
+    installations.push({ path: installedPath, status: statusValue });
+  }
+  return installations;
+}
 
 function doctorHelp() {
   console.log(`Usage:
@@ -360,16 +379,7 @@ async function doctor(args = []) {
 
   try {
     const shippedSkill = readFileSync(SKILL_PATH, "utf-8");
-    const installations = [];
-    for (const root of AGENT_SKILL_ROOTS) {
-      const installedPath = join(homedir(), root, "browser-relay/SKILL.md");
-      if (!existsSync(installedPath)) continue;
-      let statusValue = "unreadable";
-      try {
-        statusValue = readFileSync(installedPath, "utf-8") === shippedSkill ? "current" : "outdated";
-      } catch {}
-      installations.push({ path: installedPath, status: statusValue });
-    }
+    const installations = inspectInstalledSkills(shippedSkill);
     const stale = installations.filter((item) => item.status !== "current");
     add(
       "assets.skill",
@@ -379,8 +389,15 @@ async function doctor(args = []) {
         : installations.length
           ? `Bundled Agent Skill and ${installations.length} installed copy are current`
           : "Bundled Agent Skill is readable; no global copy was detected",
-      { path: SKILL_PATH, installCommand: `npx skills add "${join(PKG_DIR, "skill")}" -g`, installations },
-      stale.length ? `Update installed copies with: npx skills add "${join(PKG_DIR, "skill")}" -g` : undefined,
+      {
+        path: SKILL_PATH,
+        installCommand: "browser-relay skill install --agent codex",
+        installAgents: [...SKILL_INSTALL_AGENTS],
+        installations,
+      },
+      stale.length
+        ? "Run browser-relay skill help, then reinstall for codex, claude-code, or universal"
+        : undefined,
     );
   } catch {
     add(
@@ -582,9 +599,175 @@ function path() {
   console.log(EXTENSION_DIR);
 }
 
-function skill() {
-  const skillDir = join(PKG_DIR, "skill");
-  console.log(`npx skills add "${skillDir}" -g`);
+function skillTargetPath(agent) {
+  if (agent === "claude-code") {
+    const claudeHome = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude");
+    return join(claudeHome, "skills/browser-relay/SKILL.md");
+  }
+  return join(homedir(), ".agents/skills/browser-relay/SKILL.md");
+}
+
+function parseSkillAgents(args) {
+  const agents = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--agent" || arg === "-a") {
+      const start = agents.length;
+      while (i + 1 < args.length && !args[i + 1].startsWith("-")) agents.push(args[++i]);
+      if (agents.length === start) return { error: `${arg} requires at least one agent` };
+      continue;
+    }
+    if (arg.startsWith("--agent=")) {
+      const value = arg.slice("--agent=".length);
+      if (!value) return { error: "--agent requires at least one agent" };
+      agents.push(value);
+      continue;
+    }
+    return { error: `Unknown skill option: ${arg}` };
+  }
+
+  const unique = [...new Set(agents)];
+  const unsupported = unique.filter((agent) => !SKILL_INSTALL_AGENTS.has(agent));
+  if (unsupported.length) {
+    return {
+      error: `Unsupported agent: ${unsupported.join(", ")}. Use codex, claude-code, or universal.`,
+    };
+  }
+  return { agents: unique };
+}
+
+function skillInstallCommand(agents = ["codex"]) {
+  return `npx --yes skills add "${SKILL_DIR}" --global --yes --copy --agent ${agents.join(" ")}`;
+}
+
+function skillHelp() {
+  console.log(`Usage:
+  browser-relay skill                         Print the legacy Codex install command
+  browser-relay skill install --agent <name>  Install/update and verify the bundled Skill
+  browser-relay skill path        Print the bundled Skill directory
+  browser-relay skill help        Show this help
+
+Supported targets: codex, claude-code, universal. Pass multiple names after
+--agent to install for more than one target. "universal" installs to the
+standard ~/.agents/skills directory.
+
+The install command uses the skills CLI in global, non-interactive copy mode,
+then verifies every target SKILL.md. Exit codes: 0 success, 1 install or
+verification failure, 2 invalid usage.`);
+}
+
+function skill(args = []) {
+  const subcommand = args[0];
+  if (args.includes("--help") || args.includes("-h") || subcommand === "help") {
+    skillHelp();
+    return;
+  }
+
+  if (subcommand === undefined) {
+    console.log(skillInstallCommand());
+    return;
+  }
+
+  if (subcommand === "command") {
+    const parsed = parseSkillAgents(args.slice(1));
+    if (parsed.error) {
+      console.error(parsed.error);
+      console.error("Usage: browser-relay skill command [--agent codex|claude-code|universal]");
+      process.exitCode = 2;
+      return;
+    }
+    console.log(skillInstallCommand(parsed.agents.length ? parsed.agents : ["codex"]));
+    return;
+  }
+
+  if (subcommand === "path") {
+    if (args.length !== 1) {
+      console.error("Usage: browser-relay skill path");
+      process.exitCode = 2;
+      return;
+    }
+    console.log(SKILL_DIR);
+    return;
+  }
+
+  if (subcommand !== "install") {
+    console.error(`Unknown skill command: ${subcommand}`);
+    console.error("Usage: browser-relay skill [install|path|help]");
+    process.exitCode = 2;
+    return;
+  }
+
+  const parsed = parseSkillAgents(args.slice(1));
+  if (parsed.error) {
+    console.error(parsed.error);
+    console.error("Usage: browser-relay skill install --agent codex|claude-code|universal");
+    process.exitCode = 2;
+    return;
+  }
+  if (!parsed.agents.length) {
+    console.error("Missing required option: --agent <name>");
+    console.error("Use codex, claude-code, or universal.");
+    process.exitCode = 2;
+    return;
+  }
+
+  console.log(`Installing bundled Agent Skill from: ${SKILL_DIR}`);
+  console.log(`Targets: ${parsed.agents.join(", ")}`);
+  const installed = runNpxSync([
+    "--yes",
+    "skills",
+    "add",
+    SKILL_DIR,
+    "--global",
+    "--yes",
+    "--copy",
+    "--agent",
+    ...parsed.agents,
+  ], {
+    stdio: "inherit",
+    env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+  });
+
+  if (installed.error) {
+    console.error(`Could not run npx: ${installed.error.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (installed.status !== 0) {
+    if (installed.signal) console.error(`The skills command was terminated by signal ${installed.signal}.`);
+    else console.error(`The skills command failed with exit code ${installed.status ?? "unknown"}.`);
+    process.exitCode = 1;
+    return;
+  }
+
+  let shippedSkill;
+  try {
+    shippedSkill = readFileSync(SKILL_PATH, "utf-8");
+  } catch {
+    console.error(`Bundled Skill is missing or unreadable: ${SKILL_PATH}`);
+    process.exitCode = 1;
+    return;
+  }
+  const verification = parsed.agents.map((agent) => {
+    const target = skillTargetPath(agent);
+    let statusValue = "missing";
+    try {
+      statusValue = readFileSync(target, "utf-8") === shippedSkill ? "current" : "outdated";
+    } catch {}
+    return { agent, path: target, status: statusValue };
+  });
+  const failed = verification.filter((item) => item.status !== "current");
+  if (failed.length) {
+    console.error("The skills command exited successfully, but target verification failed:");
+    for (const item of failed) console.error(`  ${item.agent}: ${item.status} (${item.path})`);
+    console.error(`Retry manually: ${skillInstallCommand(parsed.agents)}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log("");
+  console.log("Verified Agent Skill:");
+  for (const item of verification) console.log(`  ${item.agent}: ${item.path}`);
 }
 
 function packageInfo() {
@@ -660,7 +843,7 @@ async function update(args = []) {
   console.log("Next steps:");
   console.log("  - If Chrome asks for new extension permissions, accept them.");
   console.log("  - If the extension does not reconnect, reload it at chrome://extensions.");
-  console.log("  - If you installed the agent skill, update it with: $(browser-relay skill)");
+  console.log("  - If you installed the agent skill, run browser-relay skill help and reinstall for the active agent.");
 }
 
 function info() {
@@ -695,7 +878,7 @@ Commands:
   doctor      Check the full install → extension → tab → Skill path
   logs        Tail the service logs
   path        Print the Chrome extension directory
-  skill       Print the skill directory + 'npx skills' install command
+  skill       Install, locate, or print the Agent Skill install command
   info        Show extension path + usage hints
   install     (Re)register the background service
   uninstall   Unregister the background service
@@ -1407,7 +1590,7 @@ switch (cmd) {
   case "doctor": await doctor(process.argv.slice(3)); break;
   case "logs": logs(); break;
   case "path": path(); break;
-  case "skill": skill(); break;
+  case "skill": skill(process.argv.slice(3)); break;
   case "info": info(); break;
   case "install": await install(); break;
   case "uninstall": await uninstall(); break;

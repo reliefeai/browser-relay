@@ -2,10 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 
 const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8')).version;
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+const bundledSkillDir = join(repoRoot, 'skill');
+const bundledSkill = readFileSync(join(bundledSkillDir, 'SKILL.md'), 'utf-8');
 
 async function getFreePort() {
   const server = net.createServer();
@@ -41,6 +55,166 @@ function runCli(t, port, args, env = {}) {
   });
 }
 
+function setupFakeNpx(t) {
+  const root = mkdtempSync(join(tmpdir(), 'browser-relay-skill-test-'));
+  const home = join(root, 'home');
+  const bin = join(root, 'bin');
+  mkdirSync(home, { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  const fakeSource = `
+const { copyFileSync, mkdirSync, writeFileSync } = require('node:fs');
+const { join } = require('node:path');
+const args = process.argv.slice(2);
+const home = process.env.USERPROFILE || process.env.HOME;
+writeFileSync(join(home, 'npx-args.json'), JSON.stringify(args));
+if (process.env.FAKE_NPX_MODE === 'nonzero') process.exit(7);
+if (process.env.FAKE_NPX_MODE === 'signal') process.kill(process.pid, 'SIGTERM');
+if (process.env.FAKE_NPX_MODE === 'no-copy') process.exit(0);
+const addIndex = args.indexOf('add');
+const agentIndex = args.indexOf('--agent');
+const source = args[addIndex + 1];
+const agents = agentIndex === -1 ? [] : args.slice(agentIndex + 1);
+for (const agent of agents) {
+  const base = agent === 'claude-code'
+    ? join(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'skills')
+    : join(home, '.agents', 'skills');
+  const target = join(base, 'browser-relay');
+  mkdirSync(target, { recursive: true });
+  copyFileSync(join(source, 'SKILL.md'), join(target, 'SKILL.md'));
+}
+`;
+  if (process.platform === 'win32') {
+    writeFileSync(join(bin, 'fake-npx.cjs'), fakeSource);
+    writeFileSync(join(bin, 'npx.cmd'), [
+      '@echo off',
+      `"${process.execPath}" "%~dp0fake-npx.cjs" %*`,
+      'exit /b %ERRORLEVEL%',
+      '',
+    ].join('\r\n'));
+  } else {
+    const npx = join(bin, 'npx');
+    writeFileSync(npx, `#!/usr/bin/env node\n${fakeSource}`);
+    chmodSync(npx, 0o755);
+  }
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return {
+    root,
+    home,
+    env: {
+      HOME: home,
+      USERPROFILE: home,
+      PATH: `${bin}${delimiter}${process.env.PATH}`,
+    },
+  };
+}
+
+test('skill install passes explicit agents and verifies every copied target', async (t) => {
+  const fixture = setupFakeNpx(t);
+  const claudeHome = join(fixture.root, 'custom-claude');
+  const result = await runCli(t, 0, [
+    'skill', 'install', '--agent', 'codex', 'claude-code',
+  ], {
+    ...fixture.env,
+    CLAUDE_CONFIG_DIR: claudeHome,
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(fixture.home, 'npx-args.json'), 'utf-8')), [
+    '--yes',
+    'skills',
+    'add',
+    bundledSkillDir,
+    '--global',
+    '--yes',
+    '--copy',
+    '--agent',
+    'codex',
+    'claude-code',
+  ]);
+  const codexTarget = join(fixture.home, '.agents/skills/browser-relay/SKILL.md');
+  const claudeTarget = join(claudeHome, 'skills/browser-relay/SKILL.md');
+  assert.equal(readFileSync(codexTarget, 'utf-8'), bundledSkill);
+  assert.equal(readFileSync(claudeTarget, 'utf-8'), bundledSkill);
+  assert.ok(result.stdout.includes(`codex: ${codexTarget}`));
+  assert.ok(result.stdout.includes(`claude-code: ${claudeTarget}`));
+});
+
+test('skill install rejects silent zero-install and normalizes npx failures', async (t) => {
+  const silent = setupFakeNpx(t);
+  const noCopy = await runCli(t, 0, ['skill', 'install', '--agent', 'codex'], {
+    ...silent.env,
+    FAKE_NPX_MODE: 'no-copy',
+  });
+  assert.equal(noCopy.code, 1);
+  assert.match(noCopy.stderr, /target verification failed/);
+  assert.match(noCopy.stderr, /codex: missing/);
+
+  const failed = setupFakeNpx(t);
+  const nonzero = await runCli(t, 0, ['skill', 'install', '--agent', 'codex'], {
+    ...failed.env,
+    FAKE_NPX_MODE: 'nonzero',
+  });
+  assert.equal(nonzero.code, 1);
+  assert.match(nonzero.stderr, /skills command failed with exit code 7/);
+
+  if (process.platform !== 'win32') {
+    const signalled = setupFakeNpx(t);
+    const signal = await runCli(t, 0, ['skill', 'install', '--agent', 'codex'], {
+      ...signalled.env,
+      FAKE_NPX_MODE: 'signal',
+    });
+    assert.equal(signal.code, 1);
+    assert.match(signal.stderr, /terminated by signal SIGTERM/);
+  }
+
+  const missingRoot = mkdtempSync(join(tmpdir(), 'browser-relay-no-npx-'));
+  const emptyBin = join(missingRoot, 'bin');
+  const emptyHome = join(missingRoot, 'home');
+  mkdirSync(emptyBin, { recursive: true });
+  mkdirSync(emptyHome, { recursive: true });
+  t.after(() => rmSync(missingRoot, { recursive: true, force: true }));
+  const missingNpx = await runCli(t, 0, ['skill', 'install', '--agent', 'codex'], {
+    HOME: emptyHome,
+    USERPROFILE: emptyHome,
+    PATH: emptyBin,
+  });
+  assert.equal(missingNpx.code, 1);
+  assert.match(missingNpx.stderr, /Could not run npx|skills command failed/);
+});
+
+test('skill subcommands keep legacy output while enforcing explicit install targets', async (t) => {
+  const legacy = await runCli(t, 0, ['skill']);
+  assert.equal(legacy.code, 0);
+  assert.match(legacy.stdout, /^npx --yes skills add /);
+  assert.match(legacy.stdout, /--global --yes --copy --agent codex$/m);
+
+  const command = await runCli(t, 0, ['skill', 'command', '--agent=claude-code']);
+  assert.equal(command.code, 0);
+  assert.match(command.stdout, /--agent claude-code$/m);
+
+  const deduplicated = await runCli(t, 0, [
+    'skill', 'command', '--agent', 'codex', 'codex', 'universal',
+  ]);
+  assert.equal(deduplicated.code, 0);
+  assert.match(deduplicated.stdout, /--agent codex universal$/m);
+
+  const path = await runCli(t, 0, ['skill', 'path']);
+  assert.equal(path.code, 0);
+  assert.equal(path.stdout.trim(), bundledSkillDir);
+
+  const help = await runCli(t, 0, ['skill', 'help']);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /codex, claude-code, universal/);
+
+  const missing = await runCli(t, 0, ['skill', 'install']);
+  assert.equal(missing.code, 2);
+  assert.match(missing.stderr, /Missing required option: --agent/);
+
+  const unsupported = await runCli(t, 0, ['skill', 'install', '--agent', 'cursor']);
+  assert.equal(unsupported.code, 2);
+  assert.match(unsupported.stderr, /Unsupported agent: cursor/);
+});
+
 test('CLI --json preserves structured relay errors on failure', async (t) => {
   const relay = await startFakeRelay(t, (_req, res) => {
     const body = JSON.stringify({
@@ -63,6 +237,21 @@ test('CLI --json preserves structured relay errors on failure', async (t) => {
   assert.equal(payload.ok, false);
   assert.equal(payload.code, 'endpoint_not_found');
   assert.equal(payload.status, 404);
+});
+
+test('status executes its platform service probe without a missing spawnSync import', async (t) => {
+  const relay = await startFakeRelay(t, (_req, res) => {
+    const body = JSON.stringify({ ok: true, version: packageVersion, connected: true, tabCount: 1 });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+    res.end(body);
+  });
+
+  const result = await runCli(t, relay.port, ['status']);
+
+  assert.ok(result.code === 0 || result.code === 1);
+  assert.match(result.stdout, /^Service:/m);
+  assert.match(result.stdout, /^HTTP:\s+responding/m);
+  assert.doesNotMatch(result.stderr, /spawnSync is not defined/);
 });
 
 test('wait CLI sends stable options and prints a compact success', async (t) => {
@@ -130,6 +319,34 @@ test('doctor reports a ready end-to-end browser path as structured JSON', async 
   assert.equal(payload.checks.find((check) => check.id === 'service.registration').status, 'skip');
   assert.equal(payload.summary.failed, 0);
   assert.deepEqual(payload.recommendations.filter((item) => item.includes('reload the unpacked extension')), []);
+});
+
+test('doctor recognizes the standard global .agents skill directory', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'browser-relay-doctor-skill-'));
+  const home = join(root, 'home');
+  const targetDir = join(home, '.agents/skills/browser-relay');
+  mkdirSync(targetDir, { recursive: true });
+  copyFileSync(join(bundledSkillDir, 'SKILL.md'), join(targetDir, 'SKILL.md'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const relay = await startFakeRelay(t, (_req, res) => {
+    const body = JSON.stringify({ ok: true, version: packageVersion, connected: true, tabCount: 1 });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+    res.end(body);
+  });
+  const result = await runCli(t, relay.port, ['doctor', '--json'], {
+    HOME: home,
+    USERPROFILE: home,
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  const skill = payload.checks.find((check) => check.id === 'assets.skill');
+  assert.equal(skill.status, 'pass');
+  assert.deepEqual(skill.details.installations, [{
+    path: join(targetDir, 'SKILL.md'),
+    status: 'current',
+  }]);
 });
 
 test('doctor treats a disconnected extension and zero tabs as warnings', async (t) => {

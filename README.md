@@ -126,13 +126,17 @@ For a complete read-only diagnosis, run `browser-relay doctor`. It checks the pa
 
 ### 4. Install the Agent Skill and run the first task
 
-Browser Relay ships with an agent-friendly Skill. Print the install command:
+Browser Relay ships with an agent-friendly Skill. Choose the Agent explicitly so installation never opens an interactive selector:
 
 ```bash
-browser-relay skill
+browser-relay skill install --agent codex
+
+# Claude Code, or both agents at once:
+browser-relay skill install --agent claude-code
+browser-relay skill install --agent codex claude-code
 ```
 
-Then run the printed `npx skills ...` command and choose the agent to install it into, or run it directly with `$(browser-relay skill)`. After that, your agent can operate your own browser without opening a separate automation browser.
+The command uses the standard `skills` CLI non-interactively, then reads every target `SKILL.md` back to verify it. Use `--agent universal` for agents that consume the standard `~/.agents/skills` directory, `browser-relay skill path` to inspect the bundled source, or plain `browser-relay skill` to print the legacy Codex install command. After installation, your agent can operate your own browser without opening a separate automation browser.
 
 Give the agent a small read-only task first:
 
@@ -215,7 +219,8 @@ browser-relay status     # Show service state and HTTP health
 browser-relay doctor     # Run a complete read-only installation diagnosis
 browser-relay logs       # Tail /tmp/browser-relay.log
 browser-relay path       # Print the Chrome extension directory
-browser-relay skill      # Print the Skill install command
+browser-relay skill install --agent codex # Install/update and verify the Agent Skill
+browser-relay skill path                  # Print the bundled Skill directory
 browser-relay install    # Register the background service
 browser-relay uninstall  # Unregister the background service
 
