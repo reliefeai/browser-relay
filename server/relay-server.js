@@ -823,12 +823,25 @@ async function handleClick(req, res) {
 
   const button = body.button || "left";
   const clickCount = body.doubleClick ? 2 : 1;
-  const x = Math.round(elInfo.x), y = Math.round(elInfo.y);
 
   await sendToExtension("Runtime.evaluate", { expression: `document.querySelector(${JSON.stringify(selector)})?.scrollIntoView({block:'center'})`, returnByValue: true }, sessionId).catch(() => {});
 
   const findResult2 = await sendToExtension("Runtime.evaluate", { expression: findJs, returnByValue: true }, sessionId);
   const elInfo2 = JSON.parse(findResult2?.result?.value || '{\"found\":false}');
+
+  // Chrome ignores CDP mouse input for background tabs. A normal DOM click
+  // preserves the shared-browser workflow without forcing the tab forward.
+  // Foreground tabs still receive trusted mouse events below.
+  const visibilityResult = await sendToExtension("Runtime.evaluate", { expression: "document.visibilityState", returnByValue: true }, sessionId);
+  const visibility = visibilityResult?.result?.value;
+  if (visibility === "hidden" && button === "left" && clickCount === 1) {
+    const domClickJs = `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; el.click(); return true; })()`;
+    const domClickResult = await sendToExtension("Runtime.evaluate", { expression: domClickJs, returnByValue: true }, sessionId);
+    if (domClickResult?.result?.value) {
+      return jsonResponse(res, 200, { ok: true, clicked: true, strategy: "dom", elementText: elInfo2.text || elInfo.text || "", selector });
+    }
+  }
+
   const fx = Math.round(elInfo2.found ? elInfo2.x : elInfo.x);
   const fy = Math.round(elInfo2.found ? elInfo2.y : elInfo.y);
 
@@ -836,7 +849,7 @@ async function handleClick(req, res) {
   await sendToExtension("Input.dispatchMouseEvent", { type: "mousePressed", x: fx, y: fy, button, clickCount }, sessionId);
   await sendToExtension("Input.dispatchMouseEvent", { type: "mouseReleased", x: fx, y: fy, button, clickCount }, sessionId);
 
-  jsonResponse(res, 200, { ok: true, clicked: true, elementText: elInfo2.text || elInfo.text || "", selector });
+  jsonResponse(res, 200, { ok: true, clicked: true, strategy: "mouse", elementText: elInfo2.text || elInfo.text || "", selector });
 }
 
 async function handleType(req, res) {

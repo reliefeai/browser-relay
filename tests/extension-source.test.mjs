@@ -39,3 +39,11 @@ test('extension external-control talks directly to hub, not local relay remote e
   assert.match(background, /msg\?\.type === 'enableRemoteControl'/);
   assert.match(background, /msg\?\.type === 'disableRemoteControl'/);
 });
+
+test('remote click falls back to DOM click when the controlled tab is in the background', () => {
+  const background = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf-8');
+
+  assert.match(background, /const visibility = await evalValue\(tabId, 'document\.visibilityState'\)/);
+  assert.match(background, /visibility === 'hidden'[\s\S]*el\.click\(\)[\s\S]*strategy: 'dom'/);
+  assert.match(background, /strategy: 'mouse'/);
+});

@@ -1157,13 +1157,24 @@ async function apiClick(body) {
   const clickCount = body.doubleClick ? 2 : 1
   await remoteCdp(tabId, 'Runtime.evaluate', { expression: `document.querySelector(${JSON.stringify(selector)})?.scrollIntoView({block:'center'})`, returnByValue: true }).catch(() => {})
   const el2 = JSON.parse((await evalValue(tabId, findJs)) || '{"found":false}')
+
+  // CDP mouse input is ignored for background tabs. Use a normal DOM click so
+  // remote agents do not have to steal focus from the user's active tab.
+  const visibility = await evalValue(tabId, 'document.visibilityState')
+  if (visibility === 'hidden' && button === 'left' && clickCount === 1) {
+    const domClickJs = `(function() { var el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; el.click(); return true; })()`
+    if (await evalValue(tabId, domClickJs)) {
+      return { ok: true, clicked: true, strategy: 'dom', elementText: el2.text || el.text || '', selector }
+    }
+  }
+
   const fx = Math.round(el2.found ? el2.x : el.x)
   const fy = Math.round(el2.found ? el2.y : el.y)
 
   await remoteCdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: fx, y: fy })
   await remoteCdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: fx, y: fy, button, clickCount })
   await remoteCdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: fx, y: fy, button, clickCount })
-  return { ok: true, clicked: true, elementText: el2.text || el.text || '', selector }
+  return { ok: true, clicked: true, strategy: 'mouse', elementText: el2.text || el.text || '', selector }
 }
 
 async function apiType(body) {

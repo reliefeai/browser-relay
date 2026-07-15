@@ -139,6 +139,73 @@ test('full-page screenshot uses layout metrics clip and returns capture metadata
   assert.equal(capture.params.captureBeyondViewport, true);
 });
 
+test('click uses a DOM fallback for a hidden tab instead of reporting a false mouse success', async (t) => {
+  const relay = await startRelay(t);
+  let domClicked = false;
+  const extension = await connectFakeExtension(t, relay.port, (cmd) => {
+    if (cmd.method !== 'Runtime.evaluate') return {};
+    const expression = cmd.params.expression;
+    if (expression === 'document.visibilityState') {
+      return { result: { value: 'hidden' } };
+    }
+    if (expression.includes('getBoundingClientRect')) {
+      return { result: { value: JSON.stringify({ found: true, x: 120, y: 80, text: 'Refresh approvals' }) } };
+    }
+    if (expression.includes('el.click()')) {
+      domClicked = true;
+      return { result: { value: true } };
+    }
+    return { result: { value: null } };
+  });
+
+  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
+
+  const { status, body } = await fetchJson(relay.port, '/api/click', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tabId: 'tab-1', selector: '[data-testid="refresh-approvals"]' }),
+  });
+
+  assert.equal(status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.clicked, true);
+  assert.equal(body.strategy, 'dom');
+  assert.equal(domClicked, true);
+  assert.equal(extension.commands.some((cmd) => cmd.method === 'Input.dispatchMouseEvent'), false);
+});
+
+test('click keeps trusted CDP mouse events for a visible tab', async (t) => {
+  const relay = await startRelay(t);
+  const extension = await connectFakeExtension(t, relay.port, (cmd) => {
+    if (cmd.method !== 'Runtime.evaluate') return {};
+    const expression = cmd.params.expression;
+    if (expression === 'document.visibilityState') {
+      return { result: { value: 'visible' } };
+    }
+    if (expression.includes('getBoundingClientRect')) {
+      return { result: { value: JSON.stringify({ found: true, x: 120, y: 80, text: 'Refresh approvals' }) } };
+    }
+    return { result: { value: null } };
+  });
+
+  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
+
+  const { status, body } = await fetchJson(relay.port, '/api/click', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tabId: 'tab-1', selector: '[data-testid="refresh-approvals"]' }),
+  });
+
+  assert.equal(status, 200);
+  assert.equal(body.strategy, 'mouse');
+  assert.deepEqual(
+    extension.commands.filter((cmd) => cmd.method === 'Input.dispatchMouseEvent').map((cmd) => cmd.params.type),
+    ['mouseMoved', 'mousePressed', 'mouseReleased'],
+  );
+});
+
 test('network events are captured, filterable, clearable, and redact sensitive headers', async (t) => {
   const relay = await startRelay(t);
   const extension = await connectFakeExtension(t, relay.port);
