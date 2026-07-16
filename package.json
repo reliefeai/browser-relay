@@ -33,7 +33,7 @@
     "hub:dry-run": "wrangler deploy --config hub/wrangler.toml --dry-run",
     "hub:deploy": "wrangler deploy --config hub/wrangler.toml",
     "mcp": "node server/mcp-server.js",
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test",
     "pack:dry-run": "npm pack --dry-run",
     "sync-version": "node scripts/sync-version.mjs",
     "prepublishOnly": "node scripts/sync-version.mjs",
