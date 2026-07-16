@@ -55,8 +55,10 @@ class ApiError extends Error {
 let extensionWs = null;
 let extensionConnectedSince = null;
 let extensionRemoteAddress = null;
+let extensionProtocolError = null;
 
-const connectedTargets = new Map(); // sessionId -> { tabId, targetId, targetInfo }
+const PUBLIC_TAB_ID_PATTERN = /^t_[A-Za-z0-9_-]{10}$/;
+const connectedTargets = new Map(); // sessionId -> { sessionId, tabId, targetId, targetInfo }
 let nextExtensionId = 1;
 const pendingCommands = new Map();
 let nextConsoleEntryId = 1;
@@ -131,10 +133,13 @@ function sendToExtension(method, params, sessionId) {
 // ---------------------------------------------------------------------------
 // Resolve target
 // ---------------------------------------------------------------------------
-function resolveSession(targetId) {
-  if (targetId) {
-    for (const t of connectedTargets.values()) { if (t.targetId === targetId) return t.sessionId; }
-    throw new ApiError(404, "tab_not_found", `No attached tab with targetId: ${targetId}`, { details: { targetId } });
+function resolveSession(tabId) {
+  if (extensionProtocolError) {
+    throw new ApiError(409, "extension_upgrade_required", extensionProtocolError);
+  }
+  if (tabId) {
+    for (const t of connectedTargets.values()) { if (t.tabId === tabId) return t.sessionId; }
+    throw new ApiError(404, "tab_not_found", `No attached tab with id: ${tabId}`, { details: { tabId } });
   }
   let last = null;
   for (const t of connectedTargets.values()) last = t;
@@ -177,11 +182,11 @@ function appendConsoleEntry(entry) {
   }
 }
 
-function appendConsoleEvent(sessionId, method, params = {}) {
+function appendConsoleEvent(sessionId, method, params = {}, eventTabId = "") {
   const target = targetForSession(sessionId);
   const base = {
     sessionId: sessionId || "",
-    tabId: target?.targetId || "",
+    tabId: target?.tabId || (PUBLIC_TAB_ID_PATTERN.test(eventTabId) ? eventTabId : ""),
     url: target?.targetInfo?.url || "",
     title: target?.targetInfo?.title || "",
   };
@@ -251,11 +256,11 @@ function appendNetworkEntry(entry) {
   }
 }
 
-function appendNetworkEvent(sessionId, method, params = {}) {
+function appendNetworkEvent(sessionId, method, params = {}, eventTabId = "") {
   const target = targetForSession(sessionId);
   const base = {
     sessionId: sessionId || "",
-    tabId: target?.targetId || "",
+    tabId: target?.tabId || (PUBLIC_TAB_ID_PATTERN.test(eventTabId) ? eventTabId : ""),
     pageUrl: target?.targetInfo?.url || "",
     title: target?.targetInfo?.title || "",
     requestId: params.requestId || "",
@@ -389,13 +394,14 @@ function onExtensionMessage(data) {
     const cdpMethod = msg.params?.method;
     const cdpParams = msg.params?.params;
     const eventSessionId = msg.params?.sessionId;
+    const eventTabId = msg.params?.tabId;
 
     if (eventSessionId && (
       cdpMethod === "Runtime.consoleAPICalled" ||
       cdpMethod === "Runtime.exceptionThrown" ||
       cdpMethod === "Log.entryAdded"
     )) {
-      appendConsoleEvent(eventSessionId, cdpMethod, cdpParams);
+      appendConsoleEvent(eventSessionId, cdpMethod, cdpParams, eventTabId);
     }
 
     if (eventSessionId && (
@@ -404,7 +410,7 @@ function onExtensionMessage(data) {
       cdpMethod === "Network.loadingFinished" ||
       cdpMethod === "Network.loadingFailed"
     )) {
-      appendNetworkEvent(eventSessionId, cdpMethod, cdpParams);
+      appendNetworkEvent(eventSessionId, cdpMethod, cdpParams, eventTabId);
     }
 
     if (cdpMethod === "BrowserRelay.downloadCreated") {
@@ -421,11 +427,19 @@ function onExtensionMessage(data) {
     }
 
     if (cdpMethod === "Target.attachedToTarget") {
-      const { sessionId, targetInfo } = cdpParams || {};
-      if (sessionId && targetInfo?.targetId && (targetInfo?.type ?? "page") === "page") {
-        connectedTargets.set(sessionId, { sessionId, targetId: targetInfo.targetId, targetInfo });
+      const { sessionId, tabId, targetInfo } = cdpParams || {};
+      if (sessionId && PUBLIC_TAB_ID_PATTERN.test(tabId) && targetInfo?.targetId && (targetInfo?.type ?? "page") === "page") {
+        const duplicate = [...connectedTargets.values()].find((target) => target.tabId === tabId && target.sessionId !== sessionId);
+        if (duplicate) {
+          LOG.warn("target.attach.duplicate_tab_id", { tabId, sessionId });
+          return;
+        }
+        connectedTargets.set(sessionId, { sessionId, tabId, targetId: targetInfo.targetId, targetInfo });
         void enableConsoleCapture(sessionId).catch((err) => LOG.warn("console.enable.failed", { sessionId, error: err.message || String(err) }));
         void enableNetworkCapture(sessionId).catch((err) => LOG.warn("network.enable.failed", { sessionId, error: err.message || String(err) }));
+      } else if (sessionId && targetInfo?.targetId && (targetInfo?.type ?? "page") === "page" && !PUBLIC_TAB_ID_PATTERN.test(eventTabId)) {
+        extensionProtocolError = "The Browser Relay extension is too old for short tab IDs. Reload the extension and try again.";
+        LOG.warn("target.attach.invalid_tab_id", { sessionId });
       }
     } else if (cdpMethod === "Target.detachedFromTarget") {
       const { sessionId, targetId } = cdpParams || {};
@@ -632,9 +646,12 @@ async function dispatchKeyPress(sessionId, input) {
 // ---------------------------------------------------------------------------
 
 async function handleTabs(_req, res) {
+  if (extensionProtocolError) {
+    throw new ApiError(409, "extension_upgrade_required", extensionProtocolError);
+  }
   const tabs = [];
   for (const t of connectedTargets.values()) {
-    tabs.push({ id: t.targetId, sessionId: t.sessionId, title: t.targetInfo?.title || "", url: t.targetInfo?.url || "" });
+    tabs.push({ id: t.tabId, title: t.targetInfo?.title || "", url: t.targetInfo?.url || "" });
   }
   jsonResponse(res, 200, { ok: true, tabs });
 }
@@ -683,7 +700,7 @@ async function handleConsoleClear(req, res) {
 
 function filteredNetworkEntries(filters) {
   let entries = networkEntries;
-  if (filters.tabId) entries = entries.filter((entry) => entry.tabId === filters.tabId || entry.sessionId === filters.tabId);
+  if (filters.tabId) entries = entries.filter((entry) => entry.tabId === filters.tabId);
   if (filters.type) entries = entries.filter((entry) => entry.type === filters.type);
   if (filters.method) entries = entries.filter((entry) => String(entry.method || entry.request?.method || "").toUpperCase() === String(filters.method).toUpperCase());
   if (filters.status) entries = entries.filter((entry) => Number(entry.status ?? entry.response?.status) === Number(filters.status));
@@ -752,7 +769,7 @@ async function handleNavigate(req, res) {
     // a specific tab, open a fresh blank tab and navigate that instead of failing.
     if (err instanceof ApiError && err.code === "no_attached_tabs" && !body.tabId) {
       const created = await sendToExtension("Target.createTarget", { url: "about:blank" });
-      sessionId = resolveSession(created?.targetId);
+      sessionId = resolveSession(created?.tabId);
     } else {
       throw err;
     }
@@ -1236,6 +1253,7 @@ wss.on("connection", (ws, req) => {
   extensionConnectedSince = new Date().toISOString();
   LOG.info("extension.connect", { remote, since: extensionConnectedSince });
   extensionWs = ws;
+  extensionProtocolError = null;
   connectedTargets.clear();
   clearGraceTimer();
   flushReconnectWaiters(true);

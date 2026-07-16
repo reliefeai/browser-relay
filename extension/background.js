@@ -97,6 +97,33 @@ const tabs = new Map()
 const tabBySession = new Map()
 /** @type {Map<string, number>} */
 const childSessionToTab = new Map()
+const PUBLIC_TAB_ID_PATTERN = /^t_[A-Za-z0-9_-]{10}$/
+const PUBLIC_TAB_ID_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+/** @type {Map<number, string>} */
+const publicTabIds = new Map()
+/** IDs already issued in this browser session are never reused. */
+const issuedPublicTabIds = new Set()
+
+function createPublicTabId() {
+  let id
+  do {
+    const random = crypto.getRandomValues(new Uint8Array(10))
+    let token = ''
+    for (const byte of random) token += PUBLIC_TAB_ID_ALPHABET[byte & 63]
+    id = `t_${token}`
+  } while (issuedPublicTabIds.has(id))
+  issuedPublicTabIds.add(id)
+  return id
+}
+
+function publicTabIdFor(chromeTabId) {
+  let id = publicTabIds.get(chromeTabId)
+  if (!id) {
+    id = createPublicTabId()
+    publicTabIds.set(chromeTabId, id)
+  }
+  return id
+}
 
 /** @type {Map<number, {resolve:(v:any)=>void, reject:(e:Error)=>void}>} */
 const pending = new Map()
@@ -151,7 +178,12 @@ async function persistState() {
         entries.push({ tabId, sessionId: tab.sessionId, targetId: tab.targetId, attachOrder: tab.attachOrder, idle: !!tab.idle })
       }
     }
-    await chrome.storage.session.set({ persistedTabs: entries, nextSession })
+    await chrome.storage.session.set({
+      persistedTabs: entries,
+      persistedPublicTabIds: [...publicTabIds.entries()],
+      issuedPublicTabIds: [...issuedPublicTabIds],
+      nextSession,
+    })
   } catch {
     // chrome.storage.session may not be available in all contexts
   }
@@ -159,10 +191,24 @@ async function persistState() {
 
 async function rehydrateState() {
   try {
-    const stored = await chrome.storage.session.get(['persistedTabs', 'nextSession'])
+    const stored = await chrome.storage.session.get(['persistedTabs', 'persistedPublicTabIds', 'issuedPublicTabIds', 'nextSession'])
     if (stored.nextSession) nextSession = Math.max(nextSession, stored.nextSession)
+    for (const id of Array.isArray(stored.issuedPublicTabIds) ? stored.issuedPublicTabIds : []) {
+      if (PUBLIC_TAB_ID_PATTERN.test(id)) issuedPublicTabIds.add(id)
+    }
+    const restoredIds = new Set()
+    for (const pair of Array.isArray(stored.persistedPublicTabIds) ? stored.persistedPublicTabIds : []) {
+      if (!Array.isArray(pair) || pair.length !== 2) continue
+      const chromeTabId = Number(pair[0])
+      const id = pair[1]
+      if (!Number.isInteger(chromeTabId) || !PUBLIC_TAB_ID_PATTERN.test(id) || publicTabIds.has(chromeTabId) || restoredIds.has(id)) continue
+      publicTabIds.set(chromeTabId, id)
+      issuedPublicTabIds.add(id)
+      restoredIds.add(id)
+    }
     const entries = stored.persistedTabs || []
     for (const entry of entries) {
+      publicTabIdFor(entry.tabId)
       tabs.set(entry.tabId, { state: 'connected', sessionId: entry.sessionId, targetId: entry.targetId, attachOrder: entry.attachOrder, idle: !!entry.idle, lastActivity: Date.now() })
       tabBySession.set(entry.sessionId, entry.tabId)
       setBadge(entry.tabId, entry.idle ? 'idle' : 'on')
@@ -178,8 +224,12 @@ async function rehydrateState() {
       } catch {
         tabs.delete(entry.tabId)
         tabBySession.delete(entry.sessionId)
+        publicTabIds.delete(entry.tabId)
         setBadge(entry.tabId, 'off')
       }
+    }
+    for (const chromeTabId of publicTabIds.keys()) {
+      try { await chrome.tabs.get(chromeTabId) } catch { publicTabIds.delete(chromeTabId) }
     }
   } catch {
     // Ignore rehydration errors
@@ -313,7 +363,7 @@ async function reannounceAttachedTabs() {
     }
     try {
       const info = await chrome.debugger.sendCommand({ tabId }, 'Target.getTargetInfo')
-      sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.attachedToTarget', params: { sessionId: tab.sessionId, targetInfo: { ...info?.targetInfo, attached: true }, waitingForDebugger: false } } })
+      sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.attachedToTarget', params: { sessionId: tab.sessionId, tabId: publicTabIdFor(tabId), targetInfo: { ...info?.targetInfo, attached: true }, waitingForDebugger: false } } })
       setBadge(tabId, 'on')
       void chrome.action.setTitle({ tabId, title: 'Browser Relay: attached (click to detach)' })
     } catch { setBadge(tabId, 'on') }
@@ -452,9 +502,11 @@ async function attachTab(tabId, opts = {}) {
   const targetInfo = info?.targetInfo
   const targetId = String(targetInfo?.targetId || '').trim()
   if (!targetId) throw new Error('Target.getTargetInfo returned no targetId')
+  await chrome.tabs.get(tabId) // Do not publish an id for a tab closed mid-attach.
 
   const sid = nextSession++
   const sessionId = `br-tab-${sid}`
+  const publicTabId = publicTabIdFor(tabId)
 
   tabs.set(tabId, { state: 'connected', sessionId, targetId, attachOrder: sid, idle: false, lastActivity: Date.now() })
   tabBySession.set(sessionId, tabId)
@@ -467,13 +519,13 @@ async function attachTab(tabId, opts = {}) {
     // Best-effort notify the local daemon. Remote (External Control) attaches
     // tabs the same way but has no daemon, so a closed relay must not fail attach.
     try {
-      sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.attachedToTarget', params: { sessionId, targetInfo: { ...targetInfo, attached: true }, waitingForDebugger: false } } })
+      sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.attachedToTarget', params: { sessionId, tabId: publicTabId, targetInfo: { ...targetInfo, attached: true }, waitingForDebugger: false } } })
     } catch { /* local relay down — fine for remote mode */ }
   }
 
   setBadge(tabId, 'on')
   await persistState()
-  return { sessionId, targetId }
+  return { sessionId, targetId, tabId: publicTabId }
 }
 
 async function detachTab(tabId, reason) {
@@ -538,7 +590,7 @@ async function wakeTab(tabId) {
     if (tid) tab.targetId = tid
     // Refresh the relay's sessionId->targetId map; targetId may have changed
     // if the page navigated while we were detached.
-    try { sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.attachedToTarget', params: { sessionId: tab.sessionId, targetInfo: { ...info?.targetInfo, attached: true }, waitingForDebugger: false } } }) } catch { /* relay may be down */ }
+    try { sendToRelay({ method: 'forwardCDPEvent', params: { method: 'Target.attachedToTarget', params: { sessionId: tab.sessionId, tabId: publicTabIdFor(tabId), targetInfo: { ...info?.targetInfo, attached: true }, waitingForDebugger: false } } }) } catch { /* relay may be down */ }
   } catch { /* keep previous targetId */ }
   tab.idle = false
   tab.lastActivity = Date.now()
@@ -629,6 +681,10 @@ async function handleForwardCdpCommand(msg) {
   const bySession = sessionId ? getTabBySessionId(sessionId) : null
   const targetId = typeof params?.targetId === 'string' ? params.targetId : undefined
 
+  // A command already routed to a closed tab must fail, never fall through to
+  // another tab that the user may be actively using.
+  if (sessionId && !bySession) throw new Error(`No attached tab for session ${sessionId}`)
+
   // Target.createTarget spins up its own fresh tab, so it needs no existing
   // attached tab. Handle it before the guard below so it works from a cold start
   // (zero attached tabs) — otherwise the relay could never open the first tab.
@@ -638,7 +694,7 @@ async function handleForwardCdpCommand(msg) {
     if (!tab.id) throw new Error('Failed to create tab')
     await new Promise((r) => setTimeout(r, 100))
     const attached = await attachTab(tab.id)
-    return { targetId: attached.targetId }
+    return { targetId: attached.targetId, tabId: attached.tabId }
   }
 
   const tabId = bySession?.tabId || (targetId ? getTabByTargetId(targetId) : null) || (() => { for (const [id, tab] of tabs.entries()) { if (tab.state === 'connected') return id } return null })()
@@ -706,7 +762,7 @@ function onDebuggerEvent(source, method, params) {
   captureCdpEvent(tabId, method, params)
 
   try {
-    sendToRelay({ method: 'forwardCDPEvent', params: { sessionId: source.sessionId || tab.sessionId, method, params } })
+    sendToRelay({ method: 'forwardCDPEvent', params: { sessionId: source.sessionId || tab.sessionId, tabId: publicTabIdFor(tabId), method, params } })
   } catch { /* Relay may be down */ }
 }
 
@@ -786,7 +842,11 @@ chrome.tabs.onRemoved.addListener((tabId) => void whenReady(() => {
   reattachPending.delete(tabId)
   idleDetaching.delete(tabId)
   clearTabActivity(tabId)
-  if (!tabs.has(tabId)) return
+  const hadPublicTabId = publicTabIds.delete(tabId)
+  if (!tabs.has(tabId)) {
+    if (hadPublicTabId) void persistState()
+    return
+  }
   const tab = tabs.get(tabId)
   if (tab?.sessionId) tabBySession.delete(tab.sessionId)
   tabs.delete(tabId)
@@ -801,8 +861,14 @@ chrome.tabs.onRemoved.addListener((tabId) => void whenReady(() => {
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => void whenReady(() => {
   clearTabActivity(removedTabId)
+  const publicTabId = publicTabIds.get(removedTabId)
+  publicTabIds.delete(removedTabId)
+  if (publicTabId) publicTabIds.set(addedTabId, publicTabId)
   const tab = tabs.get(removedTabId)
-  if (!tab) return
+  if (!tab) {
+    if (publicTabId) void persistState()
+    return
+  }
   tabs.delete(removedTabId)
   tabs.set(addedTabId, tab)
   if (tab.sessionId) tabBySession.set(tab.sessionId, addedTabId)
@@ -1069,17 +1135,21 @@ function apiError(code, message, status = 400, retryable = false, details) {
   }
 }
 
-// Resolve the CLI's tabId param (chrome tab id, or legacy CDP targetId) to a
-// chrome tab id; with no param, pick the active tab, else first attachable one.
+// Resolve the CLI's formal tabId to Chrome's internal numeric tab id. With no
+// param, preserve the existing active-tab behavior.
 async function resolveRemoteTabId(tabIdParam) {
   if (tabIdParam !== undefined && tabIdParam !== null && tabIdParam !== '') {
-    const n = Number(tabIdParam)
-    if (Number.isFinite(n)) {
-      try { await chrome.tabs.get(n); return n } catch { /* not a live tab id */ }
+    const publicTabId = String(tabIdParam)
+    if (!PUBLIC_TAB_ID_PATTERN.test(publicTabId)) throw new Error(`No tab matches ${publicTabId}`)
+    for (const [chromeTabId, id] of publicTabIds.entries()) {
+      if (id !== publicTabId) continue
+      try { await chrome.tabs.get(chromeTabId); return chromeTabId } catch {
+        publicTabIds.delete(chromeTabId)
+        await persistState()
+        break
+      }
     }
-    const byTarget = getTabByTargetId(String(tabIdParam))
-    if (byTarget) return byTarget
-    throw new Error(`No tab matches ${tabIdParam}`)
+    throw new Error(`No tab matches ${publicTabId}`)
   }
   const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
   if (active && isAttachableUrl(active.url)) return active.id
@@ -1129,8 +1199,9 @@ async function apiListTabs() {
   const list = []
   for (const t of await chrome.tabs.query({})) {
     if (!isAttachableUrl(t.url)) continue
-    list.push({ id: t.id, title: t.title || '', url: t.url || '', attached: tabs.get(t.id)?.state === 'connected' })
+    list.push({ id: publicTabIdFor(t.id), title: t.title || '', url: t.url || '', attached: tabs.get(t.id)?.state === 'connected' })
   }
+  await persistState()
   return { ok: true, tabs: list }
 }
 
@@ -1491,7 +1562,7 @@ function appendNetworkEntry(entry) {
 
 // Called from onDebuggerEvent for every attached tab; tabId is the chrome tab id.
 function captureCdpEvent(tabId, method, params = {}) {
-  const base = { tabId: String(tabId) }
+  const base = { tabId: publicTabIdFor(tabId) }
 
   if (method === 'Runtime.consoleAPICalled') {
     const args = (params.args || []).map(remoteObjectValue)

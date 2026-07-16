@@ -80,13 +80,14 @@ async function connectFakeExtension(t, port, handler = () => ({})) {
     }
   });
 
-  function sendEvent(sessionId, method, params = {}) {
-    ws.send(JSON.stringify({ method: 'forwardCDPEvent', params: { sessionId, method, params } }));
+  function sendEvent(sessionId, method, params = {}, tabId) {
+    ws.send(JSON.stringify({ method: 'forwardCDPEvent', params: { sessionId, ...(tabId ? { tabId } : {}), method, params } }));
   }
 
-  function announceTab({ sessionId = 'br-tab-1', targetId = 'target-1', url = 'https://example.test/', title = 'Example' } = {}) {
+  function announceTab({ sessionId = 'br-tab-1', tabId = 't_AAAAAAAAAA', targetId = 'target-1', url = 'https://example.test/', title = 'Example' } = {}) {
     sendEvent(sessionId, 'Target.attachedToTarget', {
       sessionId,
+      tabId,
       targetInfo: { targetId, type: 'page', title, url, attached: true },
       waitingForDebugger: false,
     });
@@ -105,6 +106,101 @@ async function fetchJson(port, path, options) {
   }
 }
 
+test('formal tab id hides Chrome internals and routes to exactly one session', async (t) => {
+  const relay = await startRelay(t);
+  const extension = await connectFakeExtension(t, relay.port, (cmd) => {
+    if (cmd.method === 'Runtime.evaluate') return { result: { value: 'ok' } };
+    return {};
+  });
+
+  extension.announceTab({
+    sessionId: 'session-private',
+    tabId: 't_A7k2Pm9QxL',
+    targetId: '0123456789ABCDEF0123456789ABCDEF',
+  });
+  const listed = await waitFor(async () => {
+    const result = await fetchJson(relay.port, '/api/tabs');
+    return result.body.tabs?.length === 1 ? result : null;
+  });
+  assert.deepEqual(listed.body.tabs, [{
+    id: 't_A7k2Pm9QxL',
+    title: 'Example',
+    url: 'https://example.test/',
+  }]);
+
+  const internalId = await fetchJson(relay.port, '/api/eval', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tabId: '0123456789ABCDEF0123456789ABCDEF', expression: '1' }),
+  });
+  assert.equal(internalId.status, 404);
+  assert.equal(internalId.body.code, 'tab_not_found');
+
+  const formalId = await fetchJson(relay.port, '/api/eval', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tabId: 't_A7k2Pm9QxL', expression: '1' }),
+  });
+  assert.equal(formalId.status, 200);
+  assert.equal(extension.commands.at(-1).sessionId, 'session-private');
+
+  extension.sendEvent('child-session', 'Runtime.consoleAPICalled', {
+    type: 'log',
+    args: [{ type: 'string', value: 'from child frame' }],
+  }, 't_A7k2Pm9QxL');
+  const childConsole = await waitFor(async () => {
+    const result = await fetchJson(relay.port, '/api/console?tabId=t_A7k2Pm9QxL&limit=100');
+    const entry = result.body.entries?.find((item) => item.text === 'from child frame');
+    return entry ? { result, entry } : null;
+  });
+  assert.equal(childConsole.entry.tabId, 't_A7k2Pm9QxL');
+});
+
+test('old extension gets an explicit short-id upgrade error', async (t) => {
+  const relay = await startRelay(t);
+  const extension = await connectFakeExtension(t, relay.port);
+
+  extension.sendEvent('old-session', 'Target.attachedToTarget', {
+    sessionId: 'old-session',
+    targetInfo: { targetId: 'old-target', type: 'page', title: 'Old', url: 'https://old.example/' },
+  });
+  const result = await waitFor(async () => {
+    const response = await fetchJson(relay.port, '/api/tabs');
+    return response.status === 409 ? response : null;
+  });
+
+  assert.equal(result.body.code, 'extension_upgrade_required');
+  assert.match(result.body.message, /Reload the extension/);
+});
+
+test('closed or duplicate formal ids never fall through to another tab', async (t) => {
+  const relay = await startRelay(t);
+  const extension = await connectFakeExtension(t, relay.port, (cmd) => {
+    if (cmd.method === 'Runtime.evaluate') return { result: { value: cmd.sessionId } };
+    return {};
+  });
+
+  extension.announceTab({ sessionId: 'session-a', tabId: 't_AAAAAAAAAA', targetId: 'target-a' });
+  extension.announceTab({ sessionId: 'session-b', tabId: 't_BBBBBBBBBB', targetId: 'target-b' });
+  extension.announceTab({ sessionId: 'session-duplicate', tabId: 't_AAAAAAAAAA', targetId: 'target-duplicate' });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 2);
+
+  extension.sendEvent('session-a', 'Target.detachedFromTarget', { sessionId: 'session-a', targetId: 'target-a' });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
+  const before = extension.commands.length;
+  const stale = await fetchJson(relay.port, '/api/eval', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tabId: 't_AAAAAAAAAA', expression: '1' }),
+  });
+
+  assert.equal(stale.status, 404);
+  assert.equal(stale.body.code, 'tab_not_found');
+  assert.equal(extension.commands.length, before);
+  const remaining = await fetchJson(relay.port, '/api/tabs');
+  assert.deepEqual(remaining.body.tabs.map((tab) => tab.id), ['t_BBBBBBBBBB']);
+});
+
 test('full-page screenshot uses layout metrics clip and returns capture metadata', async (t) => {
   const relay = await startRelay(t);
   const pngData = Buffer.from('png-bytes').toString('base64');
@@ -118,10 +214,10 @@ test('full-page screenshot uses layout metrics clip and returns capture metadata
     return {};
   });
 
-  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  extension.announceTab({ sessionId: 'session-1', tabId: 't_AAAAAAAAAA', targetId: 'target-1' });
   await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
 
-  const { status, body } = await fetchJson(relay.port, '/api/screenshot?tabId=tab-1&fullPage=true');
+  const { status, body } = await fetchJson(relay.port, '/api/screenshot?tabId=t_AAAAAAAAAA&fullPage=true');
 
   assert.equal(status, 200);
   assert.equal(body.ok, true);
@@ -158,13 +254,13 @@ test('click uses a DOM fallback for a hidden tab instead of reporting a false mo
     return { result: { value: null } };
   });
 
-  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  extension.announceTab({ sessionId: 'session-1', tabId: 't_AAAAAAAAAA', targetId: 'target-1' });
   await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
 
   const { status, body } = await fetchJson(relay.port, '/api/click', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ tabId: 'tab-1', selector: '[data-testid="refresh-approvals"]' }),
+    body: JSON.stringify({ tabId: 't_AAAAAAAAAA', selector: '[data-testid="refresh-approvals"]' }),
   });
 
   assert.equal(status, 200);
@@ -189,13 +285,13 @@ test('click keeps trusted CDP mouse events for a visible tab', async (t) => {
     return { result: { value: null } };
   });
 
-  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  extension.announceTab({ sessionId: 'session-1', tabId: 't_AAAAAAAAAA', targetId: 'target-1' });
   await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
 
   const { status, body } = await fetchJson(relay.port, '/api/click', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ tabId: 'tab-1', selector: '[data-testid="refresh-approvals"]' }),
+    body: JSON.stringify({ tabId: 't_AAAAAAAAAA', selector: '[data-testid="refresh-approvals"]' }),
   });
 
   assert.equal(status, 200);
@@ -225,14 +321,14 @@ test('wait polls until a CSS selector becomes visible', async (t) => {
     return {};
   });
 
-  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  extension.announceTab({ sessionId: 'session-1', tabId: 't_AAAAAAAAAA', targetId: 'target-1' });
   await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
 
   const { status, body } = await fetchJson(relay.port, '/api/wait', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      tabId: 'tab-1',
+      tabId: 't_AAAAAAAAAA',
       selector: 'button.submit',
       state: 'visible',
       timeoutMs: 1000,
@@ -260,13 +356,13 @@ test('wait timeout is a structured retryable HTTP 408', async (t) => {
     return {};
   });
 
-  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  extension.announceTab({ sessionId: 'session-1', tabId: 't_AAAAAAAAAA', targetId: 'target-1' });
   await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
 
   const { status, body } = await fetchJson(relay.port, '/api/wait', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ tabId: 'tab-1', selector: '#never', timeoutMs: 120, pollMs: 50 }),
+    body: JSON.stringify({ tabId: 't_AAAAAAAAAA', selector: '#never', timeoutMs: 120, pollMs: 50 }),
   });
 
   assert.equal(status, 408);
@@ -310,13 +406,13 @@ test('wait returns invalid_selector immediately for malformed CSS', async (t) =>
     }
     return {};
   });
-  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  extension.announceTab({ sessionId: 'session-1', tabId: 't_AAAAAAAAAA', targetId: 'target-1' });
   await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
 
   const { status, body } = await fetchJson(relay.port, '/api/wait', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ tabId: 'tab-1', selector: '[', timeoutMs: 1000 }),
+    body: JSON.stringify({ tabId: 't_AAAAAAAAAA', selector: '[', timeoutMs: 1000 }),
   });
 
   assert.equal(status, 400);
@@ -338,23 +434,23 @@ test('wait does not turn tab detach or evaluation errors into a timeout', async 
     throw new Error('Execution context was destroyed');
   });
 
-  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  extension.announceTab({ sessionId: 'session-1', tabId: 't_AAAAAAAAAA', targetId: 'target-1' });
   await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
   const detached = await fetchJson(relay.port, '/api/wait', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ tabId: 'tab-1', selector: '#ready', timeoutMs: 1000, pollMs: 50 }),
+    body: JSON.stringify({ tabId: 't_AAAAAAAAAA', selector: '#ready', timeoutMs: 1000, pollMs: 50 }),
   });
   assert.equal(detached.status, 404);
   assert.equal(detached.body.code, 'tab_not_found');
 
   mode = 'error';
-  extension.announceTab({ sessionId: 'session-2', targetId: 'tab-2' });
+  extension.announceTab({ sessionId: 'session-2', tabId: 't_BBBBBBBBBB', targetId: 'target-2' });
   await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
   const evaluation = await fetchJson(relay.port, '/api/wait', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ tabId: 'tab-2', selector: '#ready', timeoutMs: 1000, pollMs: 50 }),
+    body: JSON.stringify({ tabId: 't_BBBBBBBBBB', selector: '#ready', timeoutMs: 1000, pollMs: 50 }),
   });
   assert.equal(evaluation.status, 409);
   assert.equal(evaluation.body.code, 'wait_evaluation_failed');
@@ -365,7 +461,7 @@ test('network events are captured, filterable, clearable, and redact sensitive h
   const relay = await startRelay(t);
   const extension = await connectFakeExtension(t, relay.port);
 
-  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1', url: 'https://app.example.test/' });
+  extension.announceTab({ sessionId: 'session-1', tabId: 't_AAAAAAAAAA', targetId: 'target-1', url: 'https://app.example.test/' });
   await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
   await waitFor(() => extension.commands.some((cmd) => cmd.method === 'Network.enable'), {
     message: 'relay did not enable Network domain for attached tab',
@@ -441,8 +537,8 @@ test('navigate with no attached tabs opens a fresh tab and navigates it', async 
     if (cmd.method === 'Target.createTarget') {
       // Mirror the extension: attach + announce the new page before returning
       // its id, so the relay can resolve a session for the follow-up navigate.
-      ext.announceTab({ sessionId: 'session-new', targetId: 'target-new', url: 'about:blank' });
-      return { targetId: 'target-new' };
+      ext.announceTab({ sessionId: 'session-new', tabId: 't_CCCCCCCCCC', targetId: 'target-new', url: 'about:blank' });
+      return { targetId: 'target-new', tabId: 't_CCCCCCCCCC' };
     }
     if (cmd.method === 'Page.navigate') return { frameId: 'frame-1' };
     if (cmd.method === 'Runtime.evaluate') {
@@ -504,7 +600,7 @@ test('unknown API endpoint returns a structured endpoint_not_found error', async
 test('invalid JSON request returns a structured invalid_json error', async (t) => {
   const relay = await startRelay(t);
   const extension = await connectFakeExtension(t, relay.port);
-  extension.announceTab({ sessionId: 'session-1', targetId: 'tab-1' });
+  extension.announceTab({ sessionId: 'session-1', tabId: 't_AAAAAAAAAA', targetId: 'target-1' });
   await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
 
   const res = await fetch(`http://127.0.0.1:${relay.port}/api/eval`, {

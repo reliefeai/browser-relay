@@ -12,6 +12,27 @@ test('keepalive reconnect path recovers relay tab session after direct reconnect
   );
 });
 
+test('extension owns one 12-character formal tab id across local and remote paths', () => {
+  const source = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf-8');
+
+  assert.match(source, /PUBLIC_TAB_ID_PATTERN = \/\^t_\[A-Za-z0-9_-\]\{10\}\$\//);
+  assert.match(source, /crypto\.getRandomValues\(new Uint8Array\(10\)\)/);
+  assert.match(source, /while \(issuedPublicTabIds\.has\(id\)\)/);
+  assert.match(source, /persistedPublicTabIds:[\s\S]*issuedPublicTabIds:/);
+  assert.match(source, /Target\.attachedToTarget'[\s\S]*tabId: publicTabId/);
+  assert.match(source, /sessionId: source\.sessionId \|\| tab\.sessionId, tabId: publicTabIdFor\(tabId\), method, params/);
+  assert.match(source, /id: publicTabIdFor\(t\.id\)/);
+  assert.match(source, /const base = \{ tabId: publicTabIdFor\(tabId\) \}/);
+
+  const remoteResolver = source.slice(
+    source.indexOf('async function resolveRemoteTabId'),
+    source.indexOf('async function ensureRemoteAttached'),
+  );
+  assert.match(remoteResolver, /PUBLIC_TAB_ID_PATTERN\.test\(publicTabId\)/);
+  assert.doesNotMatch(remoteResolver, /getTabByTargetId|Number\(tabIdParam\)/);
+  assert.match(source, /if \(sessionId && !bySession\) throw new Error/);
+});
+
 test('options remote-relay UI is off by default and exposes toggle/regenerate/copy affordances', () => {
   const html = readFileSync(new URL('../extension/options.html', import.meta.url), 'utf-8');
   const js = readFileSync(new URL('../extension/options.js', import.meta.url), 'utf-8');
