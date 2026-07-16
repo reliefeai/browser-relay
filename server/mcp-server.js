@@ -148,7 +148,7 @@ const TOOLS = [
       type: "object",
       properties: {
         url: { type: "string", description: "URL to navigate to" },
-        tabId: { type: "string", description: "Tab targetId (optional, defaults to most recent)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional, defaults to most recent)" },
       },
       required: ["url"],
     },
@@ -160,7 +160,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        tabId: { type: "string", description: "Tab targetId (optional)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
         level: { type: "string", description: "Filter by level, e.g. log, warning, error" },
         limit: { type: "number", description: "Maximum entries to return (default: 100)" },
         clear: { type: "boolean", description: "Clear returned entries after reading" },
@@ -182,7 +182,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        tabId: { type: "string", description: "Tab targetId (optional)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
         type: { type: "string", enum: ["request", "response", "finished", "failed"], description: "Network entry type" },
         method: { type: "string", description: "Filter by request method, e.g. GET or POST" },
         status: { type: "number", description: "Filter by HTTP response status" },
@@ -221,7 +221,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        tabId: { type: "string", description: "Tab targetId (optional)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
         format: { type: "string", enum: ["text", "html"], description: "Output format (default: text)" },
         maxLength: { type: "number", description: "Max output length (default: 100000)" },
       },
@@ -245,7 +245,7 @@ const TOOLS = [
         state: { type: "string", enum: ["attached", "visible"], description: "Condition to wait for (default: visible)" },
         timeoutMs: { type: "integer", minimum: 1, maximum: 20000, description: "Timeout in milliseconds (default: 5000)" },
         pollMs: { type: "integer", minimum: 50, maximum: 1000, description: "Polling interval in milliseconds (default: 100)" },
-        tabId: { type: "string", description: "Tab targetId (optional, defaults to most recent)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional, defaults to most recent)" },
       },
       required: ["selector"],
     },
@@ -258,7 +258,7 @@ const TOOLS = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector for the element to click (e.g. 'button.submit', 'a[href=\"...\"]')" },
-        tabId: { type: "string", description: "Tab targetId (optional)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
         doubleClick: { type: "boolean", description: "Double-click instead of single click" },
       },
       required: ["selector"],
@@ -275,7 +275,7 @@ const TOOLS = [
         selector: { type: "string", description: "CSS selector to focus before typing (optional)" },
         submit: { type: "boolean", description: "Press Enter after typing" },
         clear: { type: "boolean", description: "Clear the field before typing" },
-        tabId: { type: "string", description: "Tab targetId (optional)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
       },
       required: ["text"],
     },
@@ -289,7 +289,7 @@ const TOOLS = [
       properties: {
         key: { type: "string", description: "Single key to press, e.g. Enter, Escape, ArrowDown, a" },
         combo: { type: "string", description: "Shortcut combo, e.g. Control+L, Shift+Tab, Meta+K" },
-        tabId: { type: "string", description: "Tab targetId (optional)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
         ctrl: { type: "boolean", description: "Hold Control while pressing key" },
         alt: { type: "boolean", description: "Hold Alt/Option while pressing key" },
         shift: { type: "boolean", description: "Hold Shift while pressing key" },
@@ -307,7 +307,7 @@ const TOOLS = [
       properties: {
         direction: { type: "string", enum: ["up", "down", "top", "bottom"], description: "Scroll direction" },
         amount: { type: "number", description: "Pixels to scroll (default: 800)" },
-        tabId: { type: "string", description: "Tab targetId (optional)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
       },
       required: ["direction"],
     },
@@ -319,7 +319,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        tabId: { type: "string", description: "Tab targetId (optional)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
         fullPage: { type: "boolean", description: "Capture the full scrollable page" },
       },
     },
@@ -332,7 +332,7 @@ const TOOLS = [
       type: "object",
       properties: {
         expression: { type: "string", description: "JavaScript expression to evaluate" },
-        tabId: { type: "string", description: "Tab targetId (optional)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
       },
       required: ["expression"],
     },
@@ -345,7 +345,7 @@ const TOOLS = [
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector to find the element (e.g. 'img', 'a.download-link')" },
-        tabId: { type: "string", description: "Tab targetId (optional)" },
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
       },
       required: ["selector"],
     },

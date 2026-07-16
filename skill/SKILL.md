@@ -117,14 +117,14 @@ List all attached browser tabs.
 ```
 GET http://127.0.0.1:18795/api/tabs
 ```
-Returns: `{ ok: true, tabs: [{ id, sessionId, title, url }] }`
+Returns: `{ ok: true, tabs: [{ id, title, url }] }`
 
 ### 2. browser_navigate
 Navigate a tab to a URL.
 ```
 POST http://127.0.0.1:18795/api/navigate
 Header: Content-Type: application/json
-Body: { "url": "https://example.com", "tabId?": "optional-target-id" }
+Body: { "url": "https://example.com", "tabId?": "optional-tab-id" }
 ```
 
 ### 2b. browser_console
@@ -279,24 +279,24 @@ When asked to do something with a web page:
 ```bash
 # 1. List tabs
 browser-relay tabs
-# ABC123    Google    https://google.com
+# t_A7k2Pm9QxL    Google    https://google.com
 
 # 2. Take snapshot to see the page
-browser-relay snapshot --tab ABC123
+browser-relay snapshot --tab t_A7k2Pm9QxL
 # [input type=text name=q placeholder="Search Google"]
 # [button "Google Search"]
 
 # 3. Type into the search box
-browser-relay type 'browser relay' --selector 'input[name=q]' --submit --tab ABC123
+browser-relay type 'browser relay' --selector 'input[name=q]' --submit --tab t_A7k2Pm9QxL
 
 # 4. Wait for results instead of sleeping
-browser-relay wait 'a[href*="github.com"]' --state visible --timeout 10000 --tab ABC123
+browser-relay wait 'a[href*="github.com"]' --state visible --timeout 10000 --tab t_A7k2Pm9QxL
 
 # 5. New snapshot after navigation
-browser-relay snapshot --tab ABC123
+browser-relay snapshot --tab t_A7k2Pm9QxL
 
 # 6. Click a result
-browser-relay click 'a[href*="github.com"]' --tab ABC123
+browser-relay click 'a[href*="github.com"]' --tab t_A7k2Pm9QxL
 ```
 
 ## MCP Registration (Claude Desktop / Cursor / Windsurf)

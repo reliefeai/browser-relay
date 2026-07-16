@@ -108,7 +108,7 @@ browser-relay tabs
 `doctor` should report a healthy relay and connected extension. `tabs` should print at least one tab ID, title, and URL:
 
 ```text
-ABC123    Example Domain    https://example.com/
+t_A7k2Pm9QxL    Example Domain    https://example.com/
 ```
 
 If `doctor` says the service manager is unavailable, start the relay in another terminal and keep it running:
@@ -170,11 +170,11 @@ The CLI is the primary interface. For agents that can run shell commands, it is 
 
 ```bash
 browser-relay tabs
-browser-relay console --tab ABC123 --limit 50
-browser-relay network --tab ABC123 --type response --status 500
-browser-relay snapshot --tab ABC123 --max-length 20000
-browser-relay wait 'button[type=submit]' --state visible --timeout 10000 --tab ABC123
-browser-relay click 'button[type=submit]' --tab ABC123
+browser-relay console --tab t_A7k2Pm9QxL --limit 50
+browser-relay network --tab t_A7k2Pm9QxL --type response --status 500
+browser-relay snapshot --tab t_A7k2Pm9QxL --max-length 20000
+browser-relay wait 'button[type=submit]' --state visible --timeout 10000 --tab t_A7k2Pm9QxL
+browser-relay click 'button[type=submit]' --tab t_A7k2Pm9QxL
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
 browser-relay key Control+L
 browser-relay scroll down --amount 1000
@@ -290,23 +290,23 @@ Errors use a structured shape across HTTP, CLI `--json`, and MCP tool errors:
 curl http://127.0.0.1:18795/api/tabs
 
 # Take a text snapshot of a page
-curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123"
+curl "http://127.0.0.1:18795/api/snapshot?tabId=t_A7k2Pm9QxL"
 
 # Wait until an element is visible (attached is also supported)
 curl -X POST http://127.0.0.1:18795/api/wait \
   -H "Content-Type: application/json" \
-  -d '{"tabId":"ABC123","selector":"button.submit","state":"visible","timeoutMs":10000}'
+  -d '{"tabId":"t_A7k2Pm9QxL","selector":"button.submit","state":"visible","timeoutMs":10000}'
 
 # Read captured console/page errors
-curl "http://127.0.0.1:18795/api/console?tabId=ABC123&limit=50"
+curl "http://127.0.0.1:18795/api/console?tabId=t_A7k2Pm9QxL&limit=50"
 
 # Read captured network activity (sensitive headers are redacted)
-curl "http://127.0.0.1:18795/api/network?tabId=ABC123&type=response&status=500"
+curl "http://127.0.0.1:18795/api/network?tabId=t_A7k2Pm9QxL&type=response&status=500"
 
 # Click an element
 curl -X POST http://127.0.0.1:18795/api/click \
   -H "Content-Type: application/json" \
-  -d '{"tabId":"ABC123","selector":"button.submit"}'
+  -d '{"tabId":"t_A7k2Pm9QxL","selector":"button.submit"}'
 ```
 
 | Endpoint | Method | Description |

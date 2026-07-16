@@ -105,7 +105,7 @@ browser-relay tabs
 `doctor` 应显示 relay 健康且扩展已连接；`tabs` 应至少输出一条标签页 ID、标题和 URL：
 
 ```text
-ABC123    Example Domain    https://example.com/
+t_A7k2Pm9QxL    Example Domain    https://example.com/
 ```
 
 如果 `doctor` 提示服务管理器不可用，请在另一个终端以前台方式启动并保持运行：
@@ -167,11 +167,11 @@ CLI 是首选接口。能执行 shell 的 Agent 用它比手写 `curl` JSON 更�
 
 ```bash
 browser-relay tabs
-browser-relay console --tab ABC123 --limit 50
-browser-relay network --tab ABC123 --type response --status 500
-browser-relay snapshot --tab ABC123 --max-length 20000
-browser-relay wait 'button[type=submit]' --state visible --timeout 10000 --tab ABC123
-browser-relay click 'button[type=submit]' --tab ABC123
+browser-relay console --tab t_A7k2Pm9QxL --limit 50
+browser-relay network --tab t_A7k2Pm9QxL --type response --status 500
+browser-relay snapshot --tab t_A7k2Pm9QxL --max-length 20000
+browser-relay wait 'button[type=submit]' --state visible --timeout 10000 --tab t_A7k2Pm9QxL
+browser-relay click 'button[type=submit]' --tab t_A7k2Pm9QxL
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
 browser-relay key Control+L
 browser-relay scroll down --amount 1000
@@ -282,18 +282,18 @@ HTTP、CLI `--json` 和 MCP 工具错误都使用结构化错误格式:
 
 ```bash
 curl http://127.0.0.1:18795/api/tabs
-curl "http://127.0.0.1:18795/api/snapshot?tabId=ABC123"
+curl "http://127.0.0.1:18795/api/snapshot?tabId=t_A7k2Pm9QxL"
 
 curl -X POST http://127.0.0.1:18795/api/wait \
   -H "Content-Type: application/json" \
-  -d '{"tabId":"ABC123","selector":"button.submit","state":"visible","timeoutMs":10000}'
+  -d '{"tabId":"t_A7k2Pm9QxL","selector":"button.submit","state":"visible","timeoutMs":10000}'
 
-curl "http://127.0.0.1:18795/api/console?tabId=ABC123&limit=50"
-curl "http://127.0.0.1:18795/api/network?tabId=ABC123&type=response&status=500"
+curl "http://127.0.0.1:18795/api/console?tabId=t_A7k2Pm9QxL&limit=50"
+curl "http://127.0.0.1:18795/api/network?tabId=t_A7k2Pm9QxL&type=response&status=500"
 
 curl -X POST http://127.0.0.1:18795/api/click \
   -H "Content-Type: application/json" \
-  -d '{"tabId":"ABC123","selector":"button.submit"}'
+  -d '{"tabId":"t_A7k2Pm9QxL","selector":"button.submit"}'
 ```
 
 | Endpoint | Method | 说明 |

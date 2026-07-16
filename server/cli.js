@@ -1669,7 +1669,7 @@ Examples:
   browser-relay tabs
   browser-relay console --limit 50
   browser-relay network --type response --status 500 --limit 20
-  browser-relay snapshot --tab ABC123 --max-length 20000
+  browser-relay snapshot --tab t_A7k2Pm9QxL --max-length 20000
   browser-relay wait 'button[type=submit]' --state visible --timeout 10000
   browser-relay click 'button[type=submit]'
   browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
