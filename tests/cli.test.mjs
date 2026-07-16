@@ -93,15 +93,9 @@ for (const agent of agents) {
   copyFileSync(join(source, 'SKILL.md'), join(target, 'SKILL.md'));
 }
 `;
-  if (process.platform === 'win32') {
-    writeFileSync(join(bin, 'fake-npx.cjs'), fakeSource);
-    writeFileSync(join(bin, 'npx.cmd'), [
-      '@echo off',
-      `"${process.execPath}" "%~dp0fake-npx.cjs" %*`,
-      'exit /b %ERRORLEVEL%',
-      '',
-    ].join('\r\n'));
-  } else {
+  const fakeNpxCli = join(bin, 'fake-npx.cjs');
+  writeFileSync(fakeNpxCli, fakeSource);
+  if (process.platform !== 'win32') {
     const npx = join(bin, 'npx');
     writeFileSync(npx, `#!/usr/bin/env node\n${fakeSource}`);
     chmodSync(npx, 0o755);
@@ -114,6 +108,7 @@ for (const agent of agents) {
       HOME: home,
       USERPROFILE: home,
       PATH: `${bin}${delimiter}${process.env.PATH}`,
+      BROWSER_RELAY_NPX_CLI: fakeNpxCli,
     },
   };
 }
@@ -251,6 +246,7 @@ test('skill install rejects silent zero-install and normalizes npx failures', as
     HOME: emptyHome,
     USERPROFILE: emptyHome,
     PATH: emptyBin,
+    BROWSER_RELAY_NPX_CLI: join(emptyBin, 'missing-npx-cli.js'),
   });
   assert.equal(missingNpx.code, 1);
   assert.match(missingNpx.stderr, /Could not run npx|skills command failed/);
