@@ -73,24 +73,15 @@ Browser Relay 补的就是这一层(也是很多人在找的 OpenClaw Browser Re
 
 ## 快速开始
 
-使用分四步。需要桌面版 Chrome 和 Node.js/npm。全局安装会在 macOS、Linux 和 Windows 上注册用户级后台服务。
+使用分四步。需要桌面版 Chrome 和 Node.js/npm；Chrome 扩展需要从安装目录手动加载。
 
 ### 1. 安装
 
 ```bash
 npm install -g @linsoai/browser-relay
-browser-relay status
 ```
 
-macOS 使用 launchd，Linux 使用 systemd-user，Windows 使用当前用户的任务计划程序；登录后会自动启动。Windows 任务只复用当前已登录用户的交互令牌并以最低权限运行，不保存密码、不主动提权，也不会使用 SYSTEM；标准用户能否注册任务仍可能受公司设备策略限制。
-
-若服务未启动，或 nvm 升级后 Node 路径发生变化，执行：
-
-```bash
-browser-relay install
-```
-
-`install` 可安全重复执行：它只刷新带 Browser Relay 所有权标记的服务定义、立即启动，并校验 relay HTTP 与已安装版本；若存在同名但不属于 Browser Relay 的 Windows 任务，它会拒绝覆盖。服务定义已是最新时可直接用 `browser-relay start`。若公司设备策略禁止注册 Windows 任务，命令会明确报错，不会静默换成能力不同的 Startup 降级方案；此时仍可用 `browser-relay` 前台运行。
+安装程序会尝试注册用户级后台服务。如果当前环境没有可用的服务管理器，下面的验证步骤会给出明确的前台启动命令，而不是抛出堆栈。
 
 ### 2. 安装 Chrome 扩展
 
@@ -102,26 +93,39 @@ browser-relay path
 
 然后打开 `chrome://extensions`,打开右上角开发者模式,点击 `Load unpacked`,选择 `browser-relay path` 输出的 `extension` 目录。
 
-升级用 `browser-relay update`:它会全局安装 `@linsoai/browser-relay@latest`、刷新后台服务并输出状态检查;扩展会在下次重连(约 30 秒内)自动重载。
-
 ### 3. 验证浏览器连接
 
-安装 Skill 前先执行两项检查：
+先运行一次完整的只读诊断，再列出已连接标签页：
 
 ```bash
-browser-relay status
+browser-relay doctor
 browser-relay tabs
 ```
 
-`status` 应显示 `HTTP: responding`；`tabs` 应至少输出一条标签页 ID、标题和 URL：
+`doctor` 应显示 relay 健康且扩展已连接；`tabs` 应至少输出一条标签页 ID、标题和 URL：
 
 ```text
 ABC123    Example Domain    https://example.com/
 ```
 
-如果没有标签页，先重新加载 unpacked 扩展，再执行 `browser-relay fix`，然后重试 `browser-relay tabs`。扩展仍未连接时，用 `browser-relay logs` 查看日志。
+如果 `doctor` 提示服务管理器不可用，请在另一个终端以前台方式启动并保持运行：
 
-需要一次性排查完整链路时，运行 `browser-relay doctor`。它会只读检查包内资源、后台服务、relay HTTP、扩展连接、已附加标签页、Agent Skill 和日志，不会安装、重启或改动任何内容；自动化场景可加 `--json`。
+```bash
+browser-relay
+```
+
+然后重试 `browser-relay doctor`。如果 relay 已健康但仍没有标签页，重新加载 unpacked 扩展，再运行 `browser-relay tabs`。`doctor` 不会安装、重启或改动任何内容；自动化场景可加 `--json`。
+
+<details>
+<summary>后台服务、升级与平台说明</summary>
+
+全局安装在 macOS 使用 launchd、Linux 使用 systemd-user、Windows 使用当前用户的任务计划程序，登录后自动启动。Windows 任务只复用当前已登录用户的交互令牌并以最低权限运行，不保存密码、不主动提权，也不使用 SYSTEM；公司设备策略仍可能禁止标准用户注册任务。
+
+`browser-relay install` 会安全刷新带 Browser Relay 所有权标记的服务定义、启动服务并校验 HTTP 与版本。nvm 升级或 `doctor` 建议时再运行即可；它拒绝覆盖同名但不属于 Browser Relay 的 Windows 任务。若受管环境没有可用服务管理器，仍可用 `browser-relay` 前台运行。
+
+升级使用 `browser-relay update`：它会全局安装 `@linsoai/browser-relay@latest`、尝试刷新服务并输出状态检查；扩展会在下一次 relay 重连时自动重载（约 30 秒内）。
+
+</details>
 
 ### 4. 安装 Agent Skill 并完成第一个任务
 
@@ -144,6 +148,8 @@ browser-relay skill install --agent codex claude-code
 ```
 
 Agent 能正确回答，就证明整条链路已经打通：Agent Skill → CLI → relay → 扩展 → 你正在使用的 Chrome 标签页。
+
+如果 Browser Relay 确实解决了你的工作流，给仓库一个 Star 可以帮助其他 Agent 开发者发现它。
 
 ## Agent 友好
 

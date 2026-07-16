@@ -76,24 +76,15 @@ Remote (Remote Relay)
 
 ## Quick Start
 
-Use Browser Relay in four steps. You need desktop Chrome plus Node.js/npm. A global install registers a user-level background service on macOS, Linux, and Windows.
+Use Browser Relay in four steps. You need desktop Chrome plus Node.js/npm. The Chrome extension is loaded manually from its installed directory.
 
 ### 1. Install
 
 ```bash
 npm install -g @linsoai/browser-relay
-browser-relay status
 ```
 
-The global install uses launchd on macOS, systemd-user on Linux, and a current-user Task Scheduler task on Windows. The service starts when you sign in. The Windows task uses your existing interactive login token with least privilege: it does not store a password, elevate itself, or run as SYSTEM. Standard-user task registration can still be restricted by organization policy.
-
-If the service is not running yet, or Node moved after an nvm upgrade:
-
-```bash
-browser-relay install
-```
-
-`install` is idempotent: it refreshes a Browser Relay-owned service definition, starts it immediately, and verifies the relay HTTP endpoint and installed version. It refuses to overwrite a same-name Windows task without Browser Relay's ownership marker. Use `start` when the definition is already current. If a managed Windows device blocks Task Scheduler registration, Browser Relay reports the failure instead of silently installing a weaker fallback; foreground mode (`browser-relay`) remains available.
+The package attempts to register a user-level background service. If your environment has no supported service manager, the verification step below gives the exact foreground command instead of failing with a stack trace.
 
 ### 2. Load the Chrome extension
 
@@ -105,26 +96,39 @@ browser-relay path
 
 Then open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `extension` directory printed by `browser-relay path`.
 
-Upgrade with `browser-relay update`. It installs `@linsoai/browser-relay@latest` globally, refreshes the background service, and prints a status check; the extension reloads itself the next time it reconnects (within ~30 seconds).
-
 ### 3. Verify the browser connection
 
-Run both checks before installing the Skill:
+Run one complete read-only diagnosis, then list the attached tabs:
 
 ```bash
-browser-relay status
+browser-relay doctor
 browser-relay tabs
 ```
 
-`status` should report `HTTP: responding`. `tabs` should print at least one tab ID, title, and URL:
+`doctor` should report a healthy relay and connected extension. `tabs` should print at least one tab ID, title, and URL:
 
 ```text
 ABC123    Example Domain    https://example.com/
 ```
 
-If no tabs appear, reload the unpacked extension, then run `browser-relay fix` and retry `browser-relay tabs`. Use `browser-relay logs` if the extension still does not reconnect.
+If `doctor` says the service manager is unavailable, start the relay in another terminal and keep it running:
 
-For a complete read-only diagnosis, run `browser-relay doctor`. It checks the package assets, background service, relay HTTP endpoint, extension connection, attached tabs, Agent Skill, and logs without installing, restarting, or changing anything. Add `--json` for automation.
+```bash
+browser-relay
+```
+
+Then retry `browser-relay doctor`. If the relay is healthy but no tabs appear, reload the unpacked extension and retry `browser-relay tabs`. `doctor` never installs, restarts, or changes anything; add `--json` for automation.
+
+<details>
+<summary>Background service, updates, and platform notes</summary>
+
+The global install uses launchd on macOS, systemd-user on Linux, and a current-user Task Scheduler task on Windows. The service starts when you sign in. The Windows task uses your existing interactive login token with least privilege: it does not store a password, elevate itself, or run as SYSTEM. Organization policy can still block standard-user task registration.
+
+`browser-relay install` safely refreshes a Browser Relay-owned service definition, starts it, and verifies the HTTP endpoint and installed version. Run it after an nvm upgrade or when `doctor` recommends it. It refuses to overwrite a same-name Windows task without Browser Relay's ownership marker. If a managed environment has no usable service manager, foreground mode (`browser-relay`) remains available.
+
+Upgrade with `browser-relay update`. It installs `@linsoai/browser-relay@latest` globally, attempts to refresh the service, and prints a status check; the extension reloads itself on its next relay reconnect (within about 30 seconds).
+
+</details>
 
 ### 4. Install the Agent Skill and run the first task
 
@@ -147,6 +151,8 @@ Use Browser Relay to tell me the title and URL of my current Chrome tab. Do not 
 ```
 
 The first successful response proves the full path works: Agent Skill → CLI → relay → extension → your existing Chrome tab.
+
+If Browser Relay solves a workflow you actually have, starring the repository helps other agent builders find it.
 
 ## Agent Friendly by Default
 

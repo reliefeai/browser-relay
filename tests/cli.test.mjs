@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import net from 'node:net';
 
 const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8')).version;
@@ -39,9 +39,18 @@ async function startFakeRelay(t, handler) {
 }
 
 function runCli(t, port, args, env = {}) {
+  const childEnv = { ...process.env };
+  if (port === null) {
+    delete childEnv.BROWSER_RELAY_URL;
+    delete childEnv.BROWSER_RELAY_HOST;
+    delete childEnv.BROWSER_RELAY_PORT;
+  } else {
+    childEnv.BROWSER_RELAY_URL = `http://127.0.0.1:${port}`;
+  }
+  Object.assign(childEnv, env);
   const child = spawn(process.execPath, ['server/cli.js', ...args], {
     cwd: new URL('..', import.meta.url),
-    env: { ...process.env, BROWSER_RELAY_URL: `http://127.0.0.1:${port}`, ...env },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -313,10 +322,127 @@ test('status executes its platform service probe without a missing spawnSync imp
 
   const result = await runCli(t, relay.port, ['status']);
 
-  assert.ok(result.code === 0 || result.code === 1);
+  assert.equal(result.code, 0);
   assert.match(result.stdout, /^Service:/m);
   assert.match(result.stdout, /^HTTP:\s+responding/m);
   assert.doesNotMatch(result.stderr, /spawnSync is not defined/);
+});
+
+test('status rejects an unrelated HTTP 200 response as unhealthy', async (t) => {
+  const relay = await startFakeRelay(t, (_req, res) => {
+    const body = JSON.stringify({ status: 'ok' });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+    res.end(body);
+  });
+
+  const result = await runCli(t, relay.port, ['status']);
+
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /^HTTP:\s+not responding/m);
+});
+
+test('Linux status and doctor recover cleanly without systemctl', { skip: process.platform !== 'linux' }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'browser-relay-no-systemctl-'));
+  const home = join(root, 'home');
+  const emptyPath = join(root, 'bin');
+  mkdirSync(home, { recursive: true });
+  mkdirSync(emptyPath, { recursive: true });
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const healthy = await runCli(t, null, ['status'], {
+    HOME: home,
+    USERPROFILE: home,
+    PATH: emptyPath,
+    NODE_OPTIONS: `--import=${pathToFileURL(join(repoRoot, 'tests/fixtures/mock-doctor-fetch.mjs')).href}`,
+    BROWSER_RELAY_TEST_FETCH_MODE: 'healthy',
+  });
+
+  assert.equal(healthy.code, 0);
+  assert.match(healthy.stdout, /Service:\s+unknown/);
+  assert.match(healthy.stdout, /systemctl is unavailable \(command not found\)/);
+  assert.match(healthy.stdout, /HTTP:\s+responding/);
+  assert.doesNotMatch(healthy.stdout, /Run the relay in this terminal/);
+  assert.doesNotMatch(healthy.stdout + healthy.stderr, /TypeError|Cannot read properties/);
+
+  const healthyDoctor = await runCli(t, null, ['doctor', '--json'], {
+    HOME: home,
+    USERPROFILE: home,
+    PATH: emptyPath,
+    NODE_OPTIONS: `--import=${pathToFileURL(join(repoRoot, 'tests/fixtures/mock-doctor-fetch.mjs')).href}`,
+    BROWSER_RELAY_TEST_FETCH_MODE: 'healthy',
+  });
+  assert.equal(healthyDoctor.code, 0);
+  assert.equal(healthyDoctor.stderr.trim(), '');
+  const healthyPayload = JSON.parse(healthyDoctor.stdout);
+  const healthyService = healthyPayload.checks.find((check) => check.id === 'service.registration');
+  assert.equal(healthyService.status, 'warn');
+  assert.equal(healthyService.details.checked, false);
+  assert.equal('remediation' in healthyService, false);
+  assert.equal(healthyPayload.recommendations.some((item) => item.includes('Start the relay')), false);
+
+  const unavailable = await runCli(t, null, ['status'], {
+    HOME: home,
+    USERPROFILE: home,
+    PATH: emptyPath,
+    NODE_OPTIONS: `--import=${pathToFileURL(join(repoRoot, 'tests/fixtures/mock-doctor-fetch.mjs')).href}`,
+    BROWSER_RELAY_TEST_FETCH_MODE: 'unreachable',
+  });
+  assert.equal(unavailable.code, 1);
+  assert.match(unavailable.stdout, /HTTP:\s+not responding/);
+  assert.match(unavailable.stdout, /Run the relay in this terminal: browser-relay/);
+  assert.doesNotMatch(unavailable.stdout + unavailable.stderr, /TypeError|Cannot read properties/);
+
+  const unavailableDoctor = await runCli(t, null, ['doctor', '--json'], {
+    HOME: home,
+    USERPROFILE: home,
+    PATH: emptyPath,
+    NODE_OPTIONS: `--import=${pathToFileURL(join(repoRoot, 'tests/fixtures/mock-doctor-fetch.mjs')).href}`,
+    BROWSER_RELAY_TEST_FETCH_MODE: 'unreachable',
+  });
+  assert.equal(unavailableDoctor.code, 1);
+  assert.equal(unavailableDoctor.stderr.trim(), '');
+  const unavailablePayload = JSON.parse(unavailableDoctor.stdout);
+  assert.equal(unavailablePayload.ok, false);
+  assert.ok(unavailablePayload.recommendations.includes('Start the relay in a terminal with: browser-relay'));
+});
+
+test('Linux status reports an unavailable systemd user bus without throwing', { skip: process.platform !== 'linux' }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'browser-relay-no-user-bus-'));
+  const home = join(root, 'home');
+  const bin = join(root, 'bin');
+  mkdirSync(home, { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  const systemctl = join(bin, 'systemctl');
+  writeFileSync(systemctl, '#!/bin/sh\necho "Failed to connect to bus: No medium found" >&2\nexit 1\n');
+  chmodSync(systemctl, 0o755);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const result = await runCli(t, null, ['status'], {
+    HOME: home,
+    USERPROFILE: home,
+    PATH: bin,
+    NODE_OPTIONS: `--import=${pathToFileURL(join(repoRoot, 'tests/fixtures/mock-doctor-fetch.mjs')).href}`,
+    BROWSER_RELAY_TEST_FETCH_MODE: 'unreachable',
+  });
+
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /systemd user status is unavailable: Failed to connect to bus: No medium found/);
+  assert.doesNotMatch(result.stdout + result.stderr, /TypeError|Cannot read properties/);
+
+  const doctor = await runCli(t, null, ['doctor', '--json'], {
+    HOME: home,
+    USERPROFILE: home,
+    PATH: bin,
+    NODE_OPTIONS: `--import=${pathToFileURL(join(repoRoot, 'tests/fixtures/mock-doctor-fetch.mjs')).href}`,
+    BROWSER_RELAY_TEST_FETCH_MODE: 'unreachable',
+  });
+  assert.equal(doctor.code, 1);
+  assert.equal(doctor.stderr.trim(), '');
+  const payload = JSON.parse(doctor.stdout);
+  const service = payload.checks.find((check) => check.id === 'service.registration');
+  assert.equal(service.details.checked, false);
+  assert.match(service.details.error, /Failed to connect to bus: No medium found/);
+  assert.ok(payload.recommendations.includes('Start the relay in a terminal with: browser-relay'));
 });
 
 test('wait CLI sends stable options and prints a compact success', async (t) => {

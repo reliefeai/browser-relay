@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { homedir, platform } from "node:os";
 import { DEFAULT_REMOTE_HOST, parseRemoteDeviceId, remoteHttpBase } from "./remote-protocol.js";
 import { runNpxSync } from "./npx-runner.js";
+import { inspectPosixServiceState, relayStartRemediation } from "./service-state.js";
 import {
   inspectWindowsTask,
   runWindowsTaskCommand,
@@ -183,78 +184,63 @@ async function fix() {
 }
 
 function serviceState() {
-  let loaded = false;
-  let pid = null;
-  const supported = sys === "darwin" || sys === "linux" || sys === "win32";
-  let registered = sys === "darwin"
-    ? existsSync(PLIST_PATH)
-    : sys === "linux"
-      ? existsSync(SYSTEMD_PATH)
-      : false;
-  let checked = false;
-  let error = null;
-  let conflict = false;
-  if (sys === "darwin") {
-    const result = spawnSync("launchctl", ["list"], { encoding: "utf-8", timeout: 1500 });
-    if (!result.error && result.status === 0) {
-      checked = true;
-      const line = result.stdout.split("\n").find((item) => item.trim().split(/\s+/).at(-1) === LAUNCHD_LABEL);
-      if (line) {
-        loaded = true;
-        const [p] = line.trim().split(/\s+/);
-        if (p && p !== "-") pid = p;
-      }
-    } else {
-      error = "launchctl status is unavailable";
-    }
-  } else if (sys === "linux") {
-    const result = spawnSync("systemctl", ["--user", "is-active", SYSTEMD_UNIT], {
-      encoding: "utf-8",
-      timeout: 1500,
+  if (sys === "darwin" || sys === "linux") {
+    return inspectPosixServiceState({
+      sys,
+      plistPath: PLIST_PATH,
+      systemdPath: SYSTEMD_PATH,
+      launchdLabel: LAUNCHD_LABEL,
+      systemdUnit: SYSTEMD_UNIT,
     });
-    const state = result.stdout.trim();
-    if (!result.error && (result.status === 0 || ["inactive", "failed", "deactivating"].includes(state))) {
-      checked = true;
-      loaded = state === "active";
-    } else {
-      error = "systemd user status is unavailable";
-    }
-  } else if (sys === "win32") {
-    const state = inspectWindowsTask();
-    checked = state.checked;
-    conflict = state.checked && state.registered && !state.owned;
-    registered = state.checked && state.registered && state.owned;
-    loaded = registered;
-    error = state.error;
   }
-  return { loaded, pid, supported, registered, checked, error, conflict };
+
+  if (sys === "win32") {
+    const state = inspectWindowsTask();
+    const registered = state.checked && state.registered && state.owned;
+    return {
+      loaded: registered,
+      pid: null,
+      supported: true,
+      registered,
+      checked: state.checked,
+      error: state.error,
+      conflict: state.checked && state.registered && !state.owned,
+    };
+  }
+
+  return {
+    loaded: false,
+    pid: null,
+    supported: false,
+    registered: false,
+    checked: false,
+    error: null,
+    conflict: false,
+  };
 }
 
 async function status() {
   const { loaded, pid, registered, checked, error, conflict } = serviceState();
 
-  let healthy = false;
-  let daemonVersion = null;
-  try {
-    const res = await fetch(`${RELAY_URL}/api/debug`, { signal: AbortSignal.timeout(2000) });
-    if (res.ok) {
-      healthy = true;
-      daemonVersion = (await res.json())?.version ?? null;
-    }
-  } catch {}
+  const relay = await probeRelayDebug();
+  const healthy = relay.ok;
+  const daemonVersion = relay.ok ? relay.data.version ?? null : null;
 
   const cliVersion = JSON.parse(readFileSync(join(PKG_DIR, "package.json"), "utf-8")).version;
   const outdated = daemonVersion && daemonVersion !== cliVersion;
   const serviceLabel = sys === "win32"
     ? !checked ? "unknown (Task Scheduler query failed)" : conflict ? "name conflict (not managed)" : registered ? "registered (Task Scheduler)" : "not registered"
-    : loaded ? "loaded" : "not loaded";
+    : !checked ? `unknown (${registered ? "definition present; state unavailable" : "state unavailable"})` : loaded ? "loaded" : registered ? "registered, not loaded" : "not registered";
   console.log(`Service:   ${serviceLabel}${pid ? ` (pid ${pid})` : ""}`);
-  if (sys === "win32" && !checked && error) console.log(`Service error: ${error}`);
+  if (!checked && error) {
+    console.log(`Service error: ${error}`);
+    if (!healthy) console.log("Next:      Run the relay in this terminal: browser-relay");
+  }
   console.log(`HTTP:      ${healthy ? "responding" : "not responding"} (${HEALTH_URL})`);
   console.log(`Version:   cli ${cliVersion}, daemon ${daemonVersion ?? "unknown"}${outdated ? "  ← outdated, run: browser-relay restart" : ""}`);
   console.log(`Extension: ${EXTENSION_DIR}`);
   console.log(`Logs:      ${LOG_FILE}`);
-  process.exit((sys === "win32" ? registered : loaded) && healthy ? 0 : 1);
+  process.exit(healthy && !conflict ? 0 : 1);
 }
 
 const AGENT_SKILL_ROOTS = [
@@ -478,6 +464,8 @@ async function doctor(args = []) {
     );
   }
 
+  const safeUrl = safeRelayUrl(RELAY_URL);
+  const relay = await probeRelayDebug();
   const customRelay = Boolean(
     process.env.BROWSER_RELAY_URL || process.env.BROWSER_RELAY_HOST || process.env.BROWSER_RELAY_PORT,
   );
@@ -528,15 +516,23 @@ async function doctor(args = []) {
           ? service.registered
             ? "Background service is registered but inactive"
             : "Background service is not registered"
-          : service.error,
-        { registered: service.registered },
-        service.registered ? "Start it with: browser-relay start" : "Optional: register it with: browser-relay install",
+          : service.error || "Background service state is unavailable",
+        {
+          registered: service.registered,
+          checked: service.checked,
+          ...(!service.checked && service.error ? { error: service.error } : {}),
+        },
+        relay.ok
+          ? undefined
+          : service.checked
+            ? service.registered
+              ? "Start it with: browser-relay start"
+              : "Optional: register it with: browser-relay install"
+            : "Start the relay in a terminal with: browser-relay",
       );
     }
   }
 
-  const safeUrl = safeRelayUrl(RELAY_URL);
-  const relay = await probeRelayDebug();
   if (relay.ok) {
     add("relay.http", "pass", "Relay HTTP debug endpoint is healthy", {
       url: safeUrl,
@@ -549,9 +545,7 @@ async function doctor(args = []) {
       "fail",
       relay.message,
       { url: safeUrl },
-      service?.registered
-        ? "Run: browser-relay status, then browser-relay logs"
-        : "Start the relay in a terminal with: browser-relay",
+      relayStartRemediation(service),
     );
   }
 
