@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="extension/icons/icon128.png" width="96" height="96" alt="Browser Relay logo">
+  <img src="../extension/icons/icon128.png" width="96" height="96" alt="Browser Relay logo">
 </p>
 
 <h1 align="center">Browser Relay</h1>
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a>
+  <a href="../README.md">English</a>
   ·
   <a href="#快速开始">快速开始</a>
   ·

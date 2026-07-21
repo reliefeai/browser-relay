@@ -19,7 +19,7 @@ import net from 'node:net';
 
 const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8')).version;
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-const bundledSkillDir = join(repoRoot, 'skill');
+const bundledSkillDir = join(repoRoot, 'skills/browser-relay');
 const bundledSkill = readFileSync(join(bundledSkillDir, 'SKILL.md'), 'utf-8');
 
 async function getFreePort() {

@@ -17,7 +17,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG_DIR = dirname(__dirname);
 const EXTENSION_DIR = join(PKG_DIR, "extension");
-const SKILL_DIR = join(PKG_DIR, "skill");
+const SKILL_DIR = join(PKG_DIR, "skills/browser-relay");
 const SKILL_PATH = join(SKILL_DIR, "SKILL.md");
 const LAUNCHD_LABEL = "org.browser-relay.service";
 const PLIST_PATH = join(homedir(), `Library/LaunchAgents/${LAUNCHD_LABEL}.plist`);
