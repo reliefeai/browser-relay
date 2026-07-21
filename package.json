@@ -1,11 +1,11 @@
 {
   "name": "@linsoai/browser-relay",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "type": "module",
   "engines": {
     "node": ">=18"
   },
-  "description": "Let AI agents share your everyday, logged-in Chrome through a Skill + CLI — locally or across multiple machines.",
+  "description": "Agent-native browser control through a Skill + CLI: share your existing, logged-in Chrome locally or across multiple machines.",
   "homepage": "https://github.com/reliefeai/browser-relay#readme",
   "repository": {
     "type": "git",
@@ -23,9 +23,9 @@
     "hub/",
     "docs/remote-control-hub.md",
     "docs/demo/intranet.html",
-    "skill/",
+    "skills/",
     "README.md",
-    "README.zh-CN.md"
+    "docs/README.zh-CN.md"
   ],
   "scripts": {
     "start": "node server/relay-server.js",
@@ -42,15 +42,17 @@
   },
   "keywords": [
     "agent-skill",
+    "agent-browser",
     "browser-agent",
+    "browser-control",
+    "browser-cli",
+    "browser-skill",
     "browser",
     "automation",
     "cli",
     "cdp",
-    "mcp",
     "ai-agent",
     "chrome",
-    "ai-tools",
     "logged-in-browser",
     "remote-browser"
   ],

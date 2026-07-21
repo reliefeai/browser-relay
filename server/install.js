@@ -146,7 +146,7 @@ const AGENT_SKILL_ROOTS = [
 
 function checkInstalledSkills() {
   let shipped;
-  try { shipped = readFileSync(join(RELAY_DIR, "skill/SKILL.md"), "utf-8"); } catch { return; }
+  try { shipped = readFileSync(join(RELAY_DIR, "skills/browser-relay/SKILL.md"), "utf-8"); } catch { return; }
   const stale = [];
   for (const root of AGENT_SKILL_ROOTS) {
     const dir = join(homedir(), root, "browser-relay");
@@ -190,7 +190,7 @@ export async function installService(options = {}) {
     log(`Or run manually: ${NODE_PATH} ${CLI_PATH}`);
     log("");
     log(`📦 Chrome Extension: ${EXTENSION_DIR}`);
-    log(`📖 Agent Skill:      ${join(RELAY_DIR, "skill/SKILL.md")}`);
+    log(`📖 Agent Skill:      ${join(RELAY_DIR, "skills/browser-relay/SKILL.md")}`);
     return { installed: false, skipped: true };
   }
 
@@ -234,7 +234,7 @@ export async function installService(options = {}) {
   log("   Already loaded? It reloads itself on its next relay reconnect (~30s).");
   log("");
   log("📖 Agent Skill:");
-  log(`   ${join(RELAY_DIR, "skill/SKILL.md")}`);
+  log(`   ${join(RELAY_DIR, "skills/browser-relay/SKILL.md")}`);
   return { installed: registered, skipped: false };
 }
 

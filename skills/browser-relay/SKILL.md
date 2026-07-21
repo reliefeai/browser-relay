@@ -1,18 +1,25 @@
 ---
 name: browser-relay
-description: Control the user's local Chrome browser through Browser Relay. For agent browser interaction, use the `browser-relay` CLI by default; use HTTP API mainly when writing code, tests, or integrations. Use for dynamic/login-protected pages, clicking, typing, screenshots, or evaluating JS in tabs that carry the user's real session. Skip static pages and pure REST APIs.
+description: Control the Chrome the user already has open and logged in through the Browser Relay CLI, without launching a separate automation browser or taking over the foreground tab. Use when an agent needs to work with existing sessions, cookies, extensions, SSO or intranet pages, or a browser on another machine. Prefer the CLI; use HTTP only for code, tests, or integrations. Skip static pages and pure REST APIs.
 ---
 
 # Browser Relay Skill
 
-Control a real Chrome browser via the Browser Relay CLI, HTTP API, or MCP. The browser runs on the user's machine, carrying their login state, cookies, and extensions.
+Work alongside the user in the Chrome they already use. Browser Relay lets the
+agent operate existing tabs through a Skill + CLI, including background tabs,
+without launching a blank browser profile or repeatedly pulling Chrome to the
+foreground. Remote Relay can reach the user's explicitly enabled browser on
+another machine.
 
-## When to Use
+## Use Browser Relay For
 
 Use Browser Relay when you need to:
 
-- **Scrape dynamic pages** — JavaScript-rendered content, SPAs, dashboards
-- **Interact with login-protected sites** — pages that require the user's session (Twitter, Gmail, Notion, etc.)
+- **Share the user's current Chrome** — keep their existing tabs, cookies, extensions, and login state
+- **Interact with login-protected sites** — including SSO, intranet pages, dashboards, Gmail, Notion, and similar apps
+- **Work without interrupting the foreground tab** — select a specific background tab and keep the user's current tab in place
+- **Reach another machine** — use Remote Relay only after the user explicitly enables it on that browser
+- **Handle dynamic pages** — JavaScript-rendered content and SPAs
 - **Perform actions** — click buttons, fill forms, scroll, take screenshots
 - **Get structured page text** — annotated DOM snapshot with `[link]`, `[button]`, `[input]` markers
 - **Evaluate arbitrary JavaScript** in the page context
@@ -23,9 +30,25 @@ Use Browser Relay when you need to:
 
 ## Prerequisites
 
-1. **Relay Server** running (Node.js, default port `18795`)
-2. **Browser Relay Chrome Extension** installed and configured with the relay port
-3. At least one Chrome tab open and attached (extension auto-attaches all tabs)
+Check setup before the first browser action:
+
+```bash
+browser-relay doctor
+```
+
+If `browser-relay` is not installed, tell the user to install the open-source
+CLI, then rerun the check:
+
+```bash
+npm install -g @linsoai/browser-relay
+browser-relay path
+```
+
+The user must load the directory printed by `browser-relay path` from
+`chrome://extensions` and explicitly enable the extension. Do not install it,
+enable Remote Relay, or invent a Remote Device ID without the user. A ready
+setup has the relay server running, the extension connected, and at least one
+regular Chrome tab attached.
 
 ## Connection Info
 

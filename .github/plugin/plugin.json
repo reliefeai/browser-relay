@@ -1,0 +1,23 @@
+{
+  "name": "browser-relay",
+  "description": "Let agents use the Chrome you already have open and logged in through a Skill + CLI, locally or across machines.",
+  "version": "1.4.1",
+  "author": {
+    "name": "reliefeai",
+    "url": "https://github.com/reliefeai"
+  },
+  "homepage": "https://github.com/reliefeai/browser-relay#readme",
+  "repository": "https://github.com/reliefeai/browser-relay",
+  "license": "MIT",
+  "keywords": [
+    "agent-skill",
+    "browser-control",
+    "chrome",
+    "cli",
+    "logged-in-browser",
+    "remote-browser"
+  ],
+  "skills": [
+    "./skills/browser-relay/"
+  ]
+}

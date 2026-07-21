@@ -1,0 +1,39 @@
+{
+  "name": "browser-relay",
+  "version": "1.4.1",
+  "description": "Let agents use the Chrome you already have open and logged in through a Skill + CLI, locally or across machines.",
+  "author": {
+    "name": "reliefeai",
+    "url": "https://github.com/reliefeai"
+  },
+  "homepage": "https://github.com/reliefeai/browser-relay#readme",
+  "repository": "https://github.com/reliefeai/browser-relay",
+  "license": "MIT",
+  "keywords": [
+    "agent-skill",
+    "browser-control",
+    "chrome",
+    "cli",
+    "logged-in-browser",
+    "remote-browser"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Browser Relay",
+    "shortDescription": "Share your logged-in Chrome with an agent",
+    "longDescription": "Use Browser Relay through a Skill and CLI to let an agent work in the Chrome you already have open and logged in, without launching a blank automation browser. Use it locally or reach an explicitly enabled browser on another machine.",
+    "developerName": "reliefeai",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/reliefeai/browser-relay",
+    "defaultPrompt": [
+      "Use Browser Relay to tell me the title of my current Chrome tab.",
+      "Use Browser Relay on a background tab without switching my foreground tab.",
+      "Use Browser Relay to list the browsers available on my other machines."
+    ]
+  }
+}

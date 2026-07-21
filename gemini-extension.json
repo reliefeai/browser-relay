@@ -1,0 +1,5 @@
+{
+  "name": "browser-relay",
+  "version": "1.4.1",
+  "description": "Let agents use the Chrome you already have open and logged in through a Skill + CLI, locally or across machines."
+}

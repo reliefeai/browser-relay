@@ -26,7 +26,7 @@
   ·
   <a href="#remote-control-remote-relay">Remote</a>
   ·
-  <a href="README.zh-CN.md">中文</a>
+  <a href="https://github.com/reliefeai/browser-relay/blob/main/docs/README.zh-CN.md">中文</a>
 </p>
 
 <p align="center">
