@@ -595,6 +595,32 @@ test('navigate on an existing tab reports the targeted tabId', async (t) => {
   assert.equal(body.tabId, 't_AAAAAAAAAA');
 });
 
+test('navigate refreshes the tab snapshot so /api/tabs shows the new URL', async (t) => {
+  const relay = await startRelay(t);
+  const ext = await connectFakeExtension(t, relay.port, async (cmd) => {
+    if (cmd.method === 'Page.navigate') return { frameId: 'frame-1' };
+    if (cmd.method === 'Runtime.evaluate') {
+      if (cmd.params?.expression === 'document.title') return { result: { value: 'Loaded' } };
+      if (cmd.params?.expression === 'location.href') return { result: { value: 'https://example.test/page' } };
+    }
+    if (cmd.method === 'Target.getTargetInfo') {
+      return { targetInfo: { targetId: 'target-a', type: 'page', title: 'Loaded', url: 'https://example.test/page', attached: true } };
+    }
+    return {};
+  });
+  ext.announceTab({ sessionId: 'session-a', tabId: 't_AAAAAAAAAA', targetId: 'target-a', url: 'https://example.test/old' });
+
+  await fetchJson(relay.port, '/api/navigate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: 'https://example.test/page', tabId: 't_AAAAAAAAAA' }),
+  });
+
+  const tabsRes = await fetchJson(relay.port, '/api/tabs');
+  const tab = tabsRes.body.tabs.find((x) => x.id === 't_AAAAAAAAAA');
+  assert.equal(tab.url, 'https://example.test/page', 'tab snapshot should refresh after navigation');
+});
+
 test('navigate targeting an unknown tab still fails instead of creating one', async (t) => {
   const relay = await startRelay(t);
   const ext = await connectFakeExtension(t, relay.port);

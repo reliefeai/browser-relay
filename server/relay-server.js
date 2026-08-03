@@ -805,6 +805,22 @@ async function handleNavigate(req, res) {
     const urlResult = await sendToExtension("Runtime.evaluate", { expression: "location.href", returnByValue: true }, sessionId);
     finalUrl = urlResult?.result?.value || url;
   } catch { /* non-critical */ }
+
+  // Refresh the cached targetInfo so /api/tabs shows the post-navigation
+  // URL/title instead of the stale attach-time snapshot (SPA pushState and
+  // the event-propagation window both leave the cache stale).
+  try {
+    const targetId = targetForSession(sessionId)?.targetId;
+    if (targetId) {
+      const infoResult = await sendToExtension("Target.getTargetInfo", { targetId }, sessionId);
+      const fresh = infoResult?.targetInfo;
+      if (fresh?.targetId) {
+        const prev = targetForSession(sessionId);
+        if (prev) connectedTargets.set(sessionId, { ...prev, targetInfo: { ...prev.targetInfo, ...fresh } });
+      }
+    }
+  } catch { /* non-critical */ }
+
   jsonResponse(res, 200, { ok: true, url: finalUrl, title, tabId: navigatedTabId, ...result });
 }
 
