@@ -1068,6 +1068,20 @@ async function handleTabCreate(req, res) {
   jsonResponse(res, 200, { ok: true, tabId: created?.tabId || null, targetId: created?.targetId || null, url });
 }
 
+async function handleTabClose(req, res) {
+  const body = await readBody(req);
+  const tabId = typeof body?.tabId === "string" ? body.tabId.trim() : "";
+  if (!tabId) {
+    return validationError(res, "tabId is required — closing must target an explicit tab", "tabId");
+  }
+  await ensureExtension();
+  // Closing is destructive, so unlike navigate it never falls back to the
+  // "last attached tab": only the explicitly requested tab may be closed.
+  const sessionId = resolveTab(tabId);
+  await sendToExtension("Target.closeTarget", {}, sessionId);
+  jsonResponse(res, 200, { ok: true, closed: true, tabId });
+}
+
 async function handleDownload(req, res) {
   const body = await readBody(req);
   const selector = body.selector;
@@ -1199,6 +1213,7 @@ const server = createServer(async (req, res) => {
       "POST /api/screenshot": handleScreenshot,
       "POST /api/scroll": handleScroll,
       "POST /api/tab-create": handleTabCreate,
+      "POST /api/tab-close": handleTabClose,
       "POST /api/download": handleDownload,
       "POST /api/download/start": handleDownloadStart,
       "GET /api/downloads": handleDownloads,

@@ -995,6 +995,7 @@ Browser commands:
   key         Press a key or keyboard shortcut
   scroll      Scroll the page
   tab-create  Create a new tab in the background with a URL
+  tab-close   Close a tab by ID
   screenshot  Save a PNG screenshot
   eval        Evaluate JavaScript in the page
   download-start Start a Chrome download from a URL
@@ -1550,6 +1551,14 @@ async function browserApiCommand(cmd, args) {
       console.log(`Created tab ${data.tabId || "?"} → ${data.url || url}`);
       return;
     }
+    case "tab-close": {
+      const tabId = requireValue(tabIdFrom(flags) || positional[0], "tabId is required");
+      const data = await relayRequest("POST", "/api/tab-close", { tabId });
+      ensureOk(data, json);
+      if (json) return printData(data, true);
+      console.log(`Closed tab ${data.tabId || tabId}`);
+      return;
+    }
     case "screenshot": {
       const output = flagValue(flags, "output") || positional[0];
       const params = new URLSearchParams();
@@ -1725,6 +1734,7 @@ switch (cmd) {
   case "key":
   case "scroll":
   case "tab-create":
+  case "tab-close":
   case "screenshot":
   case "eval":
   case "download":

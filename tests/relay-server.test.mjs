@@ -583,6 +583,60 @@ test('navigate targeting an unknown tab still fails instead of creating one', as
   assert.ok(!ext.commands.some((c) => c.method === 'Target.createTarget'));
 });
 
+test('tab-close closes the explicitly targeted tab', async (t) => {
+  const relay = await startRelay(t);
+  const ext = await connectFakeExtension(t, relay.port, async (cmd) => {
+    if (cmd.method === 'Target.closeTarget') return { success: true };
+    return {};
+  });
+  ext.announceTab({ sessionId: 'session-a', tabId: 't_AAAAAAAAAA', targetId: 'target-a' });
+
+  const { status, body } = await fetchJson(relay.port, '/api/tab-close', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tabId: 't_AAAAAAAAAA' }),
+  });
+
+  assert.equal(status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.closed, true);
+  assert.equal(body.tabId, 't_AAAAAAAAAA');
+  const closeCmd = ext.commands.find((c) => c.method === 'Target.closeTarget');
+  assert.ok(closeCmd, 'relay should send Target.closeTarget');
+  assert.equal(closeCmd.sessionId, 'session-a');
+});
+
+test('tab-close without an explicit tabId is rejected', async (t) => {
+  const relay = await startRelay(t);
+  await connectFakeExtension(t, relay.port);
+
+  const { status, body } = await fetchJson(relay.port, '/api/tab-close', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+
+  assert.equal(status, 400);
+  assert.equal(body.ok, false);
+  assert.equal(body.code, 'invalid_request');
+});
+
+test('tab-close targeting an unknown tab returns 404 and sends nothing', async (t) => {
+  const relay = await startRelay(t);
+  const ext = await connectFakeExtension(t, relay.port);
+
+  const { status, body } = await fetchJson(relay.port, '/api/tab-close', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tabId: 't_DOESNOTEXIST' }),
+  });
+
+  assert.equal(status, 404);
+  assert.equal(body.ok, false);
+  assert.equal(body.code, 'tab_not_found');
+  assert.ok(!ext.commands.some((c) => c.method === 'Target.closeTarget'));
+});
+
 test('unknown API endpoint returns a structured endpoint_not_found error', async (t) => {
   const relay = await startRelay(t);
 
