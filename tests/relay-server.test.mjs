@@ -559,12 +559,40 @@ test('navigate with no attached tabs opens a fresh tab and navigates it', async 
   assert.equal(body.ok, true);
   assert.equal(body.url, 'https://example.test/page');
   assert.equal(body.title, 'Loaded');
+  assert.equal(body.tabId, 't_CCCCCCCCCC', 'cold-start navigate should expose the fresh tab id');
 
   const createCmd = ext.commands.find((c) => c.method === 'Target.createTarget');
   assert.ok(createCmd, 'relay should create a tab when none is attached');
   assert.equal(createCmd.params.url, 'about:blank');
   const navCmd = ext.commands.find((c) => c.method === 'Page.navigate');
   assert.equal(navCmd.params.url, 'https://example.test/page');
+
+  // The fresh tab must be visible in /api/tabs so callers can target it
+  // (eval, tab-close) instead of losing track of it.
+  const tabsRes = await fetchJson(relay.port, '/api/tabs');
+  assert.equal(tabsRes.status, 200);
+  const ids = tabsRes.body.tabs.map((t) => t.id);
+  assert.ok(ids.includes('t_CCCCCCCCCC'), 'cold-start tab should appear in /api/tabs');
+});
+
+test('navigate on an existing tab reports the targeted tabId', async (t) => {
+  const relay = await startRelay(t);
+  const ext = await connectFakeExtension(t, relay.port, async (cmd) => {
+    if (cmd.method === 'Page.navigate') return { frameId: 'frame-1' };
+    if (cmd.method === 'Runtime.evaluate') return { result: { value: 'https://example.test/other' } };
+    return {};
+  });
+  ext.announceTab({ sessionId: 'session-a', tabId: 't_AAAAAAAAAA', targetId: 'target-a', url: 'https://example.test/a' });
+
+  const { status, body } = await fetchJson(relay.port, '/api/navigate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: 'https://example.test/other', tabId: 't_AAAAAAAAAA' }),
+  });
+
+  assert.equal(status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.tabId, 't_AAAAAAAAAA');
 });
 
 test('navigate targeting an unknown tab still fails instead of creating one', async (t) => {

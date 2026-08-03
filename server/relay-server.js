@@ -151,6 +151,23 @@ function resolveTab(tabId) {
   return resolveSession(tabId);
 }
 
+// Wait (briefly) for the extension's Target.attachedToTarget event to register
+// a freshly created tab, so callers can see it in /api/tabs and target it with
+// tab-close / eval etc. right after a cold-start navigate. Falls back to the
+// regular tab_not_found error on timeout.
+async function resolveAwaitTab(tabId, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return resolveSession(tabId);
+    } catch (err) {
+      const isMissing = err instanceof ApiError && err.code === "tab_not_found";
+      if (!isMissing || Date.now() >= deadline) throw err;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+}
+
 function boundedNumber(value, fallback, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -762,14 +779,19 @@ async function handleNavigate(req, res) {
   if (!url || typeof url !== "string") return validationError(res, "url is required", "url");
   await ensureExtension();
   let sessionId;
+  let navigatedTabId = "";
   try {
     sessionId = resolveTab(body.tabId);
+    navigatedTabId = connectedTargets.get(sessionId)?.tabId || "";
   } catch (err) {
     // Cold start: nothing is attached to navigate. When the caller didn't target
     // a specific tab, open a fresh blank tab and navigate that instead of failing.
     if (err instanceof ApiError && err.code === "no_attached_tabs" && !body.tabId) {
       const created = await sendToExtension("Target.createTarget", { url: "about:blank" });
-      sessionId = resolveSession(created?.tabId);
+      navigatedTabId = created?.tabId || "";
+      // The extension registers the fresh tab via Target.attachedToTarget; wait
+      // briefly so it is visible in /api/tabs and targetable right after this call.
+      sessionId = await resolveAwaitTab(navigatedTabId);
     } else {
       throw err;
     }
@@ -783,7 +805,7 @@ async function handleNavigate(req, res) {
     const urlResult = await sendToExtension("Runtime.evaluate", { expression: "location.href", returnByValue: true }, sessionId);
     finalUrl = urlResult?.result?.value || url;
   } catch { /* non-critical */ }
-  jsonResponse(res, 200, { ok: true, url: finalUrl, title, ...result });
+  jsonResponse(res, 200, { ok: true, url: finalUrl, title, tabId: navigatedTabId, ...result });
 }
 
 async function handleEval(req, res) {
