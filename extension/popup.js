@@ -13,14 +13,26 @@ const els = {
   cmd2: document.getElementById('cmd2'),
 }
 
+let lastState = null
+
 function render(state) {
-  const { connected, connecting, port, attachedCount, lastError, version } = state
+  lastState = state
+  const { enabled, connected, connecting, port, attachedCount, lastError, version, migrationPending } = state
   const host = `127.0.0.1:${port}`
 
-  if (connected) {
+  if (!enabled) {
+    els.dot.className = 'dot off'
+    els.label.textContent = t('popupPermissionRequired')
+    els.meta.textContent = t(migrationPending ? 'popupMigrationRequired' : 'popupPermissionHint')
+    els.install.classList.remove('show')
+    els.reconnect.textContent = t('popupReviewAccess')
+  } else if (connected) {
     els.dot.className = 'dot on'
     els.label.textContent = t('popupConnected')
-    els.meta.textContent = `${host} · ${attachedCount} ${t('popupTabsAttached')}`
+    const versionDiagnostic = state.compatibility?.versionMismatch && state.daemonVersion
+      ? ` · v${version} ↔ ${t('popupDaemon')} v${state.daemonVersion}`
+      : ''
+    els.meta.textContent = `${host} · ${attachedCount} ${t('popupTabsAttached')}${versionDiagnostic}`
     els.install.classList.remove('show')
     els.reconnect.textContent = t('popupReattach')
   } else if (connecting) {
@@ -50,6 +62,10 @@ async function fetchStatus() {
 }
 
 els.reconnect.addEventListener('click', async () => {
+  if (!lastState?.enabled) {
+    chrome.runtime.openOptionsPage()
+    return
+  }
   els.dot.className = 'dot connecting'
   els.label.textContent = t('popupConnecting')
   els.meta.textContent = ''

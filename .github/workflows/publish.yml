@@ -29,6 +29,9 @@ jobs:
       - name: Sync release manifests
         run: npm run sync-version
 
+      - name: Test
+        run: npm test
+
       - name: Check package contents
         run: npm pack --dry-run
 

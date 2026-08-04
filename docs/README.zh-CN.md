@@ -24,6 +24,8 @@
   <a href="#cli">CLI</a>
   ·
   <a href="#远程控制remote-relay">远程</a>
+  ·
+  <a href="../PRIVACY.md">隐私政策</a>
 </p>
 
 <p align="center">
@@ -93,6 +95,10 @@ browser-relay path
 
 然后打开 `chrome://extensions`,打开右上角开发者模式,点击 `Load unpacked`,选择 `browser-relay path` 输出的 `extension` 目录。
 
+安装后会打开扩展的 Options 页面。先阅读 Local Relay 的访问说明、勾选确认框,再点击**允许并连接**。未经这次明确同意,Browser Relay 不会连接本机守护进程,也不会自动接管标签页。Chrome 142 及以上版本还可能弹出访问本机回环网络的系统提示；允许后 Local Relay 才能连接守护进程。以后若数据披露有重大更新,升级后也会先暂停控制并要求重新确认。
+
+CLI 和守护进程用 `browser-relay update` 升级。若加载的是 npm 包内的 unpacked 扩展,升级后需要在 `chrome://extensions` 中点击 Browser Relay 的**重新加载**；Chrome Web Store 版本则按 Chrome 自己的节奏更新。扩展与守护进程暂时版本不同是正常的,Browser Relay 会通过显式桥接协议握手判断兼容,而不是强制要求包版本一致。
+
 ### 3. 验证浏览器连接
 
 先运行一次完整的只读诊断，再列出已连接标签页：
@@ -114,7 +120,7 @@ t_A7k2Pm9QxL    Example Domain    https://example.com/
 browser-relay
 ```
 
-然后重试 `browser-relay doctor`。如果 relay 已健康但仍没有标签页，重新加载 unpacked 扩展，再运行 `browser-relay tabs`。`doctor` 不会安装、重启或改动任何内容；自动化场景可加 `--json`。
+然后重试 `browser-relay doctor`。如果 relay 已健康但仍没有标签页，先确认扩展 Options 页面中的 Local Relay 已开启；再重新加载 unpacked 扩展、执行 `browser-relay fix`，然后重试 `browser-relay tabs`。扩展仍未连接时，用 `browser-relay logs` 查看日志。`doctor` 不会安装、重启或改动任何内容；自动化场景可加 `--json`。
 
 <details>
 <summary>后台服务、升级与平台说明</summary>
@@ -123,7 +129,7 @@ browser-relay
 
 `browser-relay install` 会安全刷新带 Browser Relay 所有权标记的服务定义、启动服务并校验 HTTP 与版本。nvm 升级或 `doctor` 建议时再运行即可；它拒绝覆盖同名但不属于 Browser Relay 的 Windows 任务。若受管环境没有可用服务管理器，仍可用 `browser-relay` 前台运行。
 
-升级使用 `browser-relay update`：它会全局安装 `@linsoai/browser-relay@latest`、尝试刷新服务并输出状态检查；扩展会在下一次 relay 重连时自动重载（约 30 秒内）。
+`browser-relay update` 用于升级 CLI 和守护进程。unpacked 扩展需要在 `chrome://extensions` 中手动重新加载；Chrome Web Store 安装则按 Chrome 自己的节奏独立更新。
 
 </details>
 
@@ -190,7 +196,9 @@ browser-relay eval --stdin < script.js
 
 ### 远程控制（Remote Relay）
 
-要从**另一台机器**(CI、远程 agent、不同网络)控制这个浏览器,在扩展 Options 页面打开 **Remote Relay**。浏览器会主动连到公网 Relay 服务(默认是托管的 `relay.linso.ai`)——不开放任何公网端口,也不暴露本地服务。
+要从**另一台机器**(CI、远程 agent、不同网络)控制这个浏览器,在扩展 Options 页面打开 **Remote Relay**,并确认独立的远程数据披露。浏览器会主动连到公网 Relay 服务(默认是托管的 `relay.linso.ai`)——不开放任何公网端口,也不暴露本地服务。
+
+远程 Host 必须使用 HTTPS/WSS；只有本地开发使用 `localhost` 或 `127.0.0.1` 时可以用明文。自托管 Hub 只会在确认时获得该目标域名的精确可选权限。关闭 Remote Relay 会断开连接、删除 Device ID capability，并要求 Chrome 撤销并验证这项可选 Host 权限；若 Chrome 未能移除，Options 会显示重试入口。完整数据流见[隐私政策](../PRIVACY.md)。
 
 打开后会生成一个保密的 **Device ID**——请像密码一样保管,在任何地方传给同样的 CLI 命令即可:
 
@@ -319,7 +327,7 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/downloads` | GET | 列出 Chrome 下载和最近下载事件 |
 | `/api/downloads/clear` | POST | 清理已捕获的下载事件 |
 
-真实 Chrome 下载需要扩展的 `downloads` 权限。从旧版本升级后,需在 `chrome://extensions` 里重新加载 unpacked 扩展。
+真实 Chrome 下载需要可选的 `downloads` 权限。只有需要下载命令时才在扩展 Options 页面开启 **Chrome 下载**；关闭会撤销权限,下载命令会返回 `downloads_permission_required`。
 
 这些接口远程同样可用:带 `--remote-device-id` 的 CLI 会把它们经公网 Relay 服务发到浏览器。
 
@@ -384,6 +392,7 @@ npm install
 npm start
 npm run mcp
 npm test
+npm run pack:extension  # 生成可复现的商店扩展 ZIP 与 SHA-256
 ```
 
 开发时在 `chrome://extensions` 中选择仓库里的 `extension/` 目录作为 unpacked extension。

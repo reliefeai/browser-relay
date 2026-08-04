@@ -172,6 +172,16 @@
     .confirm-msg { display: block; color: var(--danger); font-size: 12px; line-height: 1.5; }
     .confirm-actions { display: flex; gap: 10px; margin-top: 11px; }
 
+    .disclosure { margin-top: 15px; padding: 14px 16px; border-radius: 9px; border: 1px solid var(--line-strong); background: var(--inset); }
+    .disclosure h3 { margin: 0; color: var(--ink); font-family: var(--mono); font-size: 12px; letter-spacing: .04em; }
+    .disclosure p { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+    .disclosure ul { margin: 9px 0 0; padding-left: 19px; color: var(--muted); font-size: 12px; line-height: 1.65; }
+    .check { display: flex; gap: 9px; align-items: flex-start; margin-top: 12px; color: var(--ink); font-size: 12px; cursor: pointer; }
+    .check input { margin-top: 3px; accent-color: var(--accent); }
+    .permission-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 15px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--inset); }
+    .permission-row b { font-family: var(--mono); font-size: 11px; color: var(--ink); }
+    .permission-row p { margin: 3px 0 0; color: var(--muted); font-size: 11.5px; }
+
     .foot { margin-top: 18px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius); background: color-mix(in srgb, var(--panel) 60%, transparent); }
     .foot .k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .2em; text-transform: uppercase; color: var(--accent-text); }
     .foot ol { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; line-height: 1.85; }
@@ -205,6 +215,13 @@
           <div class="eyebrow"><span class="idx">01</span><b data-i18n="localRelay">Local Relay</b></div>
           <p class="desc" data-i18n-html="localDesc">Bridges your Chrome tabs to the local Browser Relay daemon on <code>127.0.0.1</code> for direct, on-device control. Remote Relay below runs on its own and does not need this.</p>
         </div>
+        <div class="switchwrap">
+          <span class="lbl is-off" id="localState" data-i18n="stateOff">Off</span>
+          <label class="switch" title="Turn Local Relay on or off">
+            <input type="checkbox" id="localToggle">
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+        </div>
       </div>
 
       <div class="row2">
@@ -218,10 +235,41 @@
         </div>
       </div>
 
+      <div id="localConsent" class="disclosure hidden" role="region" aria-labelledby="localConsentTitle">
+        <h3 id="localConsentTitle" data-i18n="localConsentTitle">Allow agents to read and operate these Chrome tabs?</h3>
+        <p data-i18n="localConsentIntro">Agents connected to the local daemon can act with the same logged-in browser session you use.</p>
+        <ul>
+          <li data-i18n="localDataRead">Read tab URLs and titles, page text, DOM/accessibility data, selection, screenshots, console output, network metadata, and values explicitly evaluated in the page (which can include non-HttpOnly cookies).</li>
+          <li data-i18n="localDataAct">Click, type, submit forms, scroll, navigate, open, activate, and close tabs.</li>
+          <li data-i18n="localDebuggerNotice">Chrome shows its debugger notice while a tab is attached; idle auto-detach reduces how long it stays visible.</li>
+          <li data-i18n="localOnlyNotice">Local mode sends commands and results only between this extension and the daemon on this computer. Remote Relay is a separate opt-in below.</li>
+        </ul>
+        <label class="check">
+          <input type="checkbox" id="localConsentCheck">
+          <span data-i18n="localConsentCheck">I understand that connected agents can see and change data in my logged-in tabs.</span>
+        </label>
+        <div class="actions">
+          <button id="localConsentApply" class="btn-primary" type="button" data-i18n="allowLocal">Allow &amp; connect</button>
+          <button id="localConsentCancel" class="btn-ghost" type="button" data-i18n="cancel">Cancel</button>
+        </div>
+      </div>
+
       <div class="actions">
-        <button id="save" class="btn-primary" data-i18n="saveTest">Save &amp; Test Connection</button>
+        <button id="save" class="btn-ghost" data-i18n="saveSettings">Save settings</button>
       </div>
       <div id="status" class="status"></div>
+
+      <div class="permission-row">
+        <div>
+          <b data-i18n="downloadsAccess">Chrome downloads (optional)</b>
+          <p data-i18n="downloadsDesc">Lets agents start downloads and read download history. Keep it off if you do not use download commands.</p>
+        </div>
+        <label class="switch" title="Allow download commands">
+          <input type="checkbox" id="downloadsToggle">
+          <span class="track"><span class="thumb"></span></span>
+        </label>
+      </div>
+      <div id="downloadsStatus" class="status"></div>
     </section>
 
     <!-- ================= REMOTE ================= -->
@@ -242,6 +290,26 @@
 
       <label class="field" for="remoteHost" data-i18n="remoteHub">Remote hub</label>
       <input type="url" id="remoteHost" placeholder="https://relay.linso.ai">
+
+      <div id="remoteDisclosure" class="disclosure hidden" role="region" aria-labelledby="remoteDisclosureTitle">
+        <h3 id="remoteDisclosureTitle" data-i18n="remoteDisclosureTitle">Send browser commands and results through this Remote Hub?</h3>
+        <p data-i18n="remoteDisclosureIntro">Remote Relay makes this logged-in browser controllable by anyone who has the secret Device ID.</p>
+        <ul>
+          <li data-i18n="remoteDataRead">The selected Hub can relay tab URLs/titles, page text and DOM/accessibility data, screenshots, selection, console output, and network metadata that may contain sensitive URLs or headers.</li>
+          <li data-i18n="remoteDataAct">Remote agents can click, type, submit forms, scroll, navigate, and manage tabs using your existing login state.</li>
+          <li data-i18n="remoteCookieNotice">The extension does not request Chrome's cookies permission, but explicit page evaluation can read values available to page JavaScript, including non-HttpOnly cookies. Remote agents can also act as you on signed-in pages.</li>
+          <li data-i18n="remoteSecretNotice">The Device ID is a password-like capability. Browser Relay stores it in this extension until you switch Remote Relay off.</li>
+        </ul>
+        <p data-i18n-html="privacyLink">Read the <a class="lnk" href="https://github.com/reliefeai/browser-relay/blob/main/PRIVACY.md" target="_blank" rel="noopener">Privacy Policy</a> before enabling.</p>
+        <label class="check">
+          <input type="checkbox" id="remoteDisclosureCheck">
+          <span data-i18n="remoteDisclosureCheck">I understand this data flow and will keep the Device ID secret.</span>
+        </label>
+        <div class="actions">
+          <button id="remoteDisclosureApply" class="btn-primary" type="button" data-i18n="enableRemote">Enable Remote Relay</button>
+          <button id="remoteDisclosureCancel" class="btn-ghost" type="button" data-i18n="cancel">Cancel</button>
+        </div>
+      </div>
 
       <div id="remoteDetails" class="hidden">
         <label class="field" for="remoteDeviceId" data-i18n-html="deviceId">Device ID <span class="note">— secret · treat it like a password</span></label>
@@ -269,6 +337,9 @@
       </div>
 
       <div id="remoteStatus" class="status"></div>
+      <div class="actions">
+        <button id="retryRemotePermissionCleanup" class="btn-warn hidden" type="button" data-i18n="retryPermissionCleanup">Retry permission cleanup</button>
+      </div>
     </section>
 
     <!-- ================= FOOTER ================= -->
@@ -280,10 +351,11 @@
         <li data-i18n="step3">Save the Local Relay settings above</li>
         <li data-i18n="step4">Flip Remote Relay on, copy the command, run it from anywhere</li>
       </ol>
+      <p class="desc"><a class="lnk" href="https://github.com/reliefeai/browser-relay/blob/main/PRIVACY.md" target="_blank" rel="noopener" data-i18n="privacyPolicy">Privacy Policy</a></p>
     </div>
   </main>
 
   <script src="i18n.js"></script>
-  <script src="options.js"></script>
+  <script type="module" src="options.js"></script>
 </body>
 </html>

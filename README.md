@@ -26,6 +26,8 @@
   ·
   <a href="#remote-control-remote-relay">Remote</a>
   ·
+  <a href="PRIVACY.md">Privacy</a>
+  ·
   <a href="https://github.com/reliefeai/browser-relay/blob/main/docs/README.zh-CN.md">中文</a>
 </p>
 
@@ -96,6 +98,10 @@ browser-relay path
 
 Then open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `extension` directory printed by `browser-relay path`.
 
+The Options page opens after installation. Review the Local Relay access disclosure, check the acknowledgement, then click **Allow & connect**. Browser Relay does not connect to the daemon or automatically attach tabs before this explicit consent. Chrome 142+ may also show its own Local Network Access prompt for the loopback daemon; allow it for Local Relay to connect. An upgrade that introduces a new disclosure pauses control until you review it again.
+
+Upgrade the CLI and daemon with `browser-relay update`. If you loaded the npm package's unpacked extension, click **Reload** for Browser Relay on `chrome://extensions` after updating. A Chrome Web Store install updates on Chrome's own schedule; its version can temporarily differ from the daemon, and Browser Relay uses an explicit bridge-protocol handshake instead of requiring package versions to match.
+
 ### 3. Verify the browser connection
 
 Run one complete read-only diagnosis, then list the attached tabs:
@@ -117,7 +123,7 @@ If `doctor` says the service manager is unavailable, start the relay in another 
 browser-relay
 ```
 
-Then retry `browser-relay doctor`. If the relay is healthy but no tabs appear, reload the unpacked extension and retry `browser-relay tabs`. `doctor` never installs, restarts, or changes anything; add `--json` for automation.
+Then retry `browser-relay doctor`. If the relay is healthy but no tabs appear, first confirm that Local Relay is enabled in the extension Options page. Then reload the unpacked extension, run `browser-relay fix`, and retry `browser-relay tabs`; use `browser-relay logs` if it still does not reconnect. `doctor` never installs, restarts, or changes anything; add `--json` for automation.
 
 <details>
 <summary>Background service, updates, and platform notes</summary>
@@ -126,7 +132,7 @@ The global install uses launchd on macOS, systemd-user on Linux, and a current-u
 
 `browser-relay install` safely refreshes a Browser Relay-owned service definition, starts it, and verifies the HTTP endpoint and installed version. Run it after an nvm upgrade or when `doctor` recommends it. It refuses to overwrite a same-name Windows task without Browser Relay's ownership marker. If a managed environment has no usable service manager, foreground mode (`browser-relay`) remains available.
 
-Upgrade with `browser-relay update`. It installs `@linsoai/browser-relay@latest` globally, attempts to refresh the service, and prints a status check; the extension reloads itself on its next relay reconnect (within about 30 seconds).
+`browser-relay update` upgrades the CLI and daemon. Reload an unpacked extension manually from `chrome://extensions`; a Chrome Web Store install updates independently on Chrome's schedule.
 
 </details>
 
@@ -193,7 +199,9 @@ All browser commands accept `--json` for the raw API response and `--tab <id>` t
 
 ### Remote control (Remote Relay)
 
-To drive this browser from **another machine** — a CI box, a remote agent, a different network — turn on **Remote Relay** in the extension's Options page. The browser connects out to a public relay service (the hosted `relay.linso.ai` by default); nothing listens on a public port and no local server is exposed.
+To drive this browser from **another machine** — a CI box, a remote agent, a different network — turn on **Remote Relay** in the extension's Options page and confirm the separate remote-data disclosure. The browser connects out to a public relay service (the hosted `relay.linso.ai` by default); nothing listens on a public port and no local server is exposed.
+
+Remote hosts require HTTPS/WSS, except for local development on `localhost` or `127.0.0.1`. A self-hosted Hub receives only an exact, runtime-granted host permission. Turning Remote Relay off closes the connection, deletes the Device ID capability, and asks Chrome to revoke and verify that optional host permission. If Chrome cannot remove it, Options shows a retry action. See the [Privacy Policy](PRIVACY.md) for the full data flow.
 
 Turning it on mints a secret **Device ID** — treat it like a password. Pass it to the same CLI commands from anywhere:
 
@@ -332,7 +340,7 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/downloads` | GET | List Chrome downloads and recent download events |
 | `/api/downloads/clear` | POST | Clear captured download events |
 
-Real Chrome downloads require the extension's `downloads` permission. After upgrading from an older Browser Relay version, reload the unpacked extension in `chrome://extensions`.
+Real Chrome downloads require the optional `downloads` permission. Enable **Chrome downloads** in the extension Options page only if you use download commands; turning it off revokes the permission and download commands return `downloads_permission_required`.
 
 The same endpoints are reachable remotely: a CLI running with `--remote-device-id` sends them through the public relay to the browser.
 
@@ -403,6 +411,7 @@ npm install
 npm start
 npm run mcp
 npm test
+npm run pack:extension  # deterministic dist/*.zip + SHA-256 for Chrome Web Store review
 ```
 
 Load the local `extension/` directory from `chrome://extensions` in Developer mode.

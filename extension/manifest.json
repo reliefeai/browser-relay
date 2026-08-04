@@ -12,16 +12,21 @@
   "permissions": [
     "debugger",
     "tabs",
-    "activeTab",
     "storage",
-    "alarms",
-    "downloads",
-    "webNavigation"
+    "alarms"
+  ],
+  "optional_permissions": [
+    "downloads"
   ],
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*",
+    "https://127.0.0.1/*",
+    "https://localhost/*",
     "https://relay.linso.ai/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js",

@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import net from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket } from 'ws';
+import { BRIDGE_BASE_CAPABILITIES, BRIDGE_PROTOCOL } from '../extension/protocol.js';
 
 async function getFreePort() {
   const server = net.createServer();
@@ -63,8 +64,10 @@ async function connectFakeExtension(t, port, handler = () => ({})) {
   t.after(() => ws.close());
 
   const commands = [];
+  const messages = [];
   ws.on('message', async (raw) => {
     const msg = JSON.parse(raw.toString());
+    messages.push(msg);
     if (msg.method === 'ping') {
       ws.send(JSON.stringify({ method: 'pong' }));
       return;
@@ -93,7 +96,11 @@ async function connectFakeExtension(t, port, handler = () => ({})) {
     });
   }
 
-  return { ws, commands, sendEvent, announceTab };
+  function sendHello({ version = '1.2.1', protocol = BRIDGE_PROTOCOL, capabilities = BRIDGE_BASE_CAPABILITIES } = {}) {
+    ws.send(JSON.stringify({ method: 'BrowserRelay.hello', params: { version, protocol, capabilities } }));
+  }
+
+  return { ws, commands, messages, sendEvent, announceTab, sendHello };
 }
 
 async function fetchJson(port, path, options) {
@@ -199,6 +206,80 @@ test('closed or duplicate formal ids never fall through to another tab', async (
   assert.equal(extension.commands.length, before);
   const remaining = await fetchJson(relay.port, '/api/tabs');
   assert.deepEqual(remaining.body.tabs.map((tab) => tab.id), ['t_BBBBBBBBBB']);
+});
+
+test('new daemon keeps an old extension working in explicit legacy mode', async (t) => {
+  const relay = await startRelay(t);
+  const extension = await connectFakeExtension(t, relay.port);
+  extension.announceTab();
+
+  const debug = await waitFor(async () => {
+    const result = await fetchJson(relay.port, '/api/debug');
+    return result.body.extension?.mode === 'legacy' ? result.body : null;
+  });
+  assert.deepEqual(debug.bridgeProtocol, BRIDGE_PROTOCOL);
+  assert.ok(debug.capabilities.includes('cdp'));
+  assert.equal(debug.extension.version, null);
+  assert.equal(debug.extension.compatible, true);
+
+  const tabs = await fetchJson(relay.port, '/api/tabs');
+  assert.equal(tabs.status, 200);
+  assert.equal(tabs.body.tabs.length, 1);
+});
+
+test('declared extension handshake exposes versions, protocol, and capabilities without requiring SemVer equality', async (t) => {
+  const relay = await startRelay(t);
+  const extension = await connectFakeExtension(t, relay.port);
+  extension.sendHello({ version: '0.9.0', capabilities: ['cdp', 'tabs'] });
+
+  const debug = await waitFor(async () => {
+    const result = await fetchJson(relay.port, '/api/debug');
+    return result.body.extension?.mode === 'declared' ? result.body : null;
+  });
+  assert.equal(debug.extension.version, '0.9.0');
+  assert.equal(debug.extension.compatible, true);
+  assert.equal(debug.extension.selectedProtocol, 1);
+  assert.deepEqual(debug.extension.capabilities, ['cdp', 'tabs']);
+  assert.ok(extension.messages.some((message) => message.method === 'BrowserRelay.helloAck' && message.params.compatible === true));
+});
+
+test('declared capabilities return unsupported_capability and can be refreshed after optional permission changes', async (t) => {
+  const relay = await startRelay(t);
+  const extension = await connectFakeExtension(t, relay.port, (command) => {
+    if (command.method === 'BrowserRelay.download') return { id: 73 };
+    return {};
+  });
+  extension.sendHello({ capabilities: ['cdp'] });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/debug')).body.extension?.mode === 'declared');
+
+  const unsupported = await fetchJson(relay.port, '/api/download/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url: 'https://example.test/file.zip' }),
+  });
+  assert.equal(unsupported.status, 501);
+  assert.equal(unsupported.body.code, 'unsupported_capability');
+  assert.equal(unsupported.body.details.capability, 'downloads');
+
+  extension.sendHello({ capabilities: ['cdp', 'downloads'] });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/debug')).body.extension?.capabilities.includes('downloads'));
+  const supported = await fetchJson(relay.port, '/api/download/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url: 'https://example.test/file.zip' }),
+  });
+  assert.equal(supported.status, 200);
+  assert.equal(supported.body.downloadId, 73);
+});
+
+test('daemon rejects a declared non-overlapping bridge protocol', async (t) => {
+  const relay = await startRelay(t);
+  const extension = await connectFakeExtension(t, relay.port);
+  const closed = once(extension.ws, 'close');
+  extension.sendHello({ protocol: { name: BRIDGE_PROTOCOL.name, min: 2, max: 2 } });
+  const [code] = await closed;
+  assert.equal(code, 1002);
+  assert.ok(extension.messages.some((message) => message.method === 'BrowserRelay.helloAck' && message.params.compatible === false));
 });
 
 test('full-page screenshot uses layout metrics clip and returns capture metadata', async (t) => {

@@ -36,7 +36,7 @@ test('Cloudflare first-writer claim requires the secret-derived route and resist
   assert.deepEqual(await device.authorize(validSecret, { routeId }), { ok: true, claimed: false });
 });
 
-test('Cloudflare hub ignores hello and rpc responses from sockets that are not the authenticated device', () => {
+test('Cloudflare hub ignores unauthenticated hello while accepting legacy and declared protocol metadata', () => {
   const device = new BrowserRelayDevice({}, {});
   const authenticated = {};
   const candidate = {};
@@ -44,8 +44,17 @@ test('Cloudflare hub ignores hello and rpc responses from sockets that are not t
   device.handleDeviceMessage(candidate, JSON.stringify({ type: 'device.hello', version: 'attacker' }));
   assert.equal(device.hello, null);
 
-  device.handleDeviceMessage(authenticated, JSON.stringify({ type: 'device.hello', version: '1.3.0' }));
+  device.handleDeviceMessage(authenticated, JSON.stringify({ type: 'device.hello', version: '1.2.1' }));
+  assert.equal(device.hello.version, '1.2.1');
+  assert.equal(device.hello.protocol, undefined);
+
+  device.handleDeviceMessage(authenticated, JSON.stringify({
+    type: 'device.hello',
+    version: '1.3.0',
+    protocol: { name: 'browser-relay-bridge', min: 1, max: 1 },
+  }));
   assert.equal(device.hello.version, '1.3.0');
+  assert.deepEqual(device.hello.protocol, { name: 'browser-relay-bridge', min: 1, max: 1 });
 });
 
 test('Cloudflare connect path authenticates before replacement and keeps query-token compatibility only in the hub', () => {

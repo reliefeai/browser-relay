@@ -4,7 +4,18 @@ import { spawn } from 'node:child_process';
 import net from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket } from 'ws';
-import { deriveRouteId } from '../server/remote-protocol.js';
+import { deriveRouteId, normalizeRemoteHost, remoteHttpBase, remoteWsBase } from '../server/remote-protocol.js';
+
+test('remote clients require encrypted transport outside loopback', () => {
+  assert.equal(normalizeRemoteHost('hub.example.com/'), 'https://hub.example.com');
+  assert.equal(remoteHttpBase('wss://hub.example.com/base'), 'https://hub.example.com/base');
+  assert.equal(remoteWsBase('https://hub.example.com/base'), 'wss://hub.example.com/base');
+  assert.equal(remoteWsBase('http://127.0.0.1:8787'), 'ws://127.0.0.1:8787');
+  assert.throws(() => normalizeRemoteHost('http://hub.example.com'), /HTTPS or WSS unless/);
+  assert.throws(() => normalizeRemoteHost('ws://10.0.0.5:8787'), /HTTPS or WSS unless/);
+  assert.throws(() => normalizeRemoteHost('https://user:pass@hub.example.com'), /credentials/);
+  assert.throws(() => normalizeRemoteHost('https://hub.example.com?token=secret'), /query string/);
+});
 
 async function getFreePort() {
   const server = net.createServer();

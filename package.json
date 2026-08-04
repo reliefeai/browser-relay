@@ -25,7 +25,8 @@
     "docs/demo/intranet.html",
     "skills/",
     "README.md",
-    "docs/README.zh-CN.md"
+    "docs/README.zh-CN.md",
+    "PRIVACY.md"
   ],
   "scripts": {
     "start": "node server/relay-server.js",
@@ -35,8 +36,9 @@
     "mcp": "node server/mcp-server.js",
     "test": "node --test",
     "pack:dry-run": "npm pack --dry-run",
+    "pack:extension": "node scripts/pack-extension.mjs",
     "sync-version": "node scripts/sync-version.mjs",
-    "prepublishOnly": "node scripts/sync-version.mjs",
+    "prepublishOnly": "npm run sync-version && npm test",
     "postinstall": "node server/install.js",
     "postuninstall": "node server/uninstall.js"
   },

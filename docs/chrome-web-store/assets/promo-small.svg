@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="280" viewBox="0 0 440 280" role="img" aria-labelledby="title desc">
+  <title id="title">Browser Relay promotional tile</title>
+  <desc id="desc">Browser Relay brand mark connecting an agent node to one Chrome window and three machines.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07110d"/>
+      <stop offset="0.52" stop-color="#101c17"/>
+      <stop offset="1" stop-color="#14253d"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.65" cy="0.35" r="0.8">
+      <stop offset="0" stop-color="#a3e635" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#a3e635" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="440" height="280" fill="url(#bg)"/>
+  <rect width="440" height="280" fill="url(#glow)"/>
+  <path d="M0 48H440M0 96H440M0 144H440M0 192H440M0 240H440M55 0V280M110 0V280M165 0V280M220 0V280M275 0V280M330 0V280M385 0V280" stroke="#b8f36c" stroke-opacity="0.045"/>
+
+  <g transform="translate(30 30)">
+    <rect width="64" height="64" rx="16" fill="#111b2e" stroke="#dff9b5" stroke-opacity="0.16"/>
+    <path d="M20 40L32 25L44 40" fill="none" stroke="#7de89b" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="20" cy="40" r="6.5" fill="#f2f7f4"/>
+    <circle cx="32" cy="25" r="6.5" fill="#f2f7f4"/>
+    <circle cx="44" cy="40" r="6.5" fill="#f2f7f4"/>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="178" y="44" width="226" height="142" rx="18" fill="#f6faf7"/>
+    <rect x="178" y="44" width="226" height="27" rx="18" fill="#dfe8e2"/>
+    <path d="M178 71H404" stroke="#c8d5cc"/>
+    <circle cx="195" cy="58" r="4" fill="#fb7185"/>
+    <circle cx="208" cy="58" r="4" fill="#f6c95f"/>
+    <circle cx="221" cy="58" r="4" fill="#65d68b"/>
+    <rect x="196" y="89" width="60" height="77" rx="10" fill="#13233d"/>
+    <rect x="270" y="90" width="114" height="14" rx="7" fill="#d5dfd8"/>
+    <rect x="270" y="114" width="92" height="9" rx="4.5" fill="#e0e8e2"/>
+    <rect x="270" y="135" width="52" height="20" rx="10" fill="#a3e635"/>
+    <circle cx="226" cy="112" r="14" fill="#a3e635"/>
+    <path d="M216 139H236" stroke="#6c809f" stroke-width="6" stroke-linecap="round"/>
+  </g>
+
+  <g fill="none" stroke="#a3e635" stroke-width="3" stroke-linecap="round" stroke-dasharray="4 8">
+    <path d="M102 112C132 112 138 114 166 114"/>
+    <path d="M290 194V216"/>
+    <path d="M290 216H219V235"/>
+    <path d="M290 216H290V235"/>
+    <path d="M290 216H361V235"/>
+  </g>
+  <circle cx="92" cy="112" r="13" fill="#a3e635"/>
+  <circle cx="92" cy="112" r="5" fill="#0a120d"/>
+
+  <g fill="#eaf2ed" stroke="#9fb1a6" stroke-opacity="0.45">
+    <rect x="202" y="235" width="34" height="23" rx="5"/>
+    <rect x="273" y="235" width="34" height="23" rx="5"/>
+    <rect x="344" y="235" width="34" height="23" rx="5"/>
+  </g>
+  <g fill="#a3e635">
+    <circle cx="219" cy="246.5" r="3"/>
+    <circle cx="290" cy="246.5" r="3"/>
+    <circle cx="361" cy="246.5" r="3"/>
+  </g>
+
+  <text x="30" y="218" fill="#f3f8f5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="27" font-weight="720" letter-spacing="-0.5">Browser Relay</text>
+</svg>

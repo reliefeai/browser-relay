@@ -4,11 +4,33 @@ export const DEFAULT_REMOTE_HOST = "https://relay.linso.ai";
 export const REMOTE_DEVICE_ID_PREFIX = "br";
 export const REMOTE_RPC_TIMEOUT_MS = 30_000;
 
+function isLoopbackRemoteHost(hostname) {
+  const value = String(hostname || "").toLowerCase();
+  return value === "localhost" || value === "127.0.0.1";
+}
+
 export function normalizeRemoteHost(host = DEFAULT_REMOTE_HOST) {
-  const value = String(host || DEFAULT_REMOTE_HOST).trim().replace(/\/+$/, "");
-  if (!value) return DEFAULT_REMOTE_HOST;
-  if (/^https?:\/\//i.test(value) || /^wss?:\/\//i.test(value)) return value;
-  return `https://${value}`;
+  let value = String(host || DEFAULT_REMOTE_HOST).trim();
+  if (!value) value = DEFAULT_REMOTE_HOST;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) value = `https://${value}`;
+
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Remote host must be a valid URL");
+  }
+  if (!["https:", "wss:", "http:", "ws:"].includes(url.protocol)) {
+    throw new Error("Remote host must use HTTPS or WSS");
+  }
+  if (url.username || url.password) throw new Error("Remote host must not contain embedded credentials");
+  if (url.search || url.hash) throw new Error("Remote host must not contain a query string or fragment");
+  const secure = url.protocol === "https:" || url.protocol === "wss:";
+  if (!secure && !isLoopbackRemoteHost(url.hostname)) {
+    throw new Error("Remote host must use HTTPS or WSS unless it is localhost or 127.0.0.1");
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+  return url.toString().replace(/\/$/, "");
 }
 
 export function remoteHttpBase(host) {

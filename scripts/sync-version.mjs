@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Sync package-owned extension and agent marketplace manifests to package.json.
+// Sync package-owned agent marketplace manifests to package.json.
+// The Chrome Web Store extension has an independent release version.
 // Run via `npm run sync-version` or automatically on `prepublishOnly`.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -8,7 +9,6 @@ import { fileURLToPath } from "node:url";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
 const manifestPaths = [
-  "extension/manifest.json",
   "gemini-extension.json",
   ".github/plugin/plugin.json",
   ".claude-plugin/plugin.json",

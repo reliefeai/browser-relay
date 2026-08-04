@@ -4,9 +4,22 @@
 import { SNAPSHOT_JS } from './snapshot.js'
 import { buildWaitExpression, normalizeWaitOptions } from './wait.js'
 import { createRemoteAuthMessageHandler } from './remote-auth.js'
+import {
+  LOCAL_CONSENT_VERSION,
+  REMOTE_DISCLOSURE_VERSION,
+  REMOTE_CAPABILITY_KEYS,
+  buildConsentMigration,
+  hasRemoteCapability,
+  hasCurrentRemoteDisclosure,
+} from './consent.js'
+import { DEFAULT_REMOTE_HOST, remoteHostConfig, remoteWsBase } from './remote-host.js'
+import {
+  BRIDGE_BASE_CAPABILITIES,
+  BRIDGE_PROTOCOL,
+  bridgeCompatibility,
+} from './protocol.js'
 
 const DEFAULT_PORT = 18795
-const DEFAULT_REMOTE_HOST = 'https://relay.linso.ai'
 // Soft-detach a tab's debugger after this many idle seconds so Chrome's
 // "started debugging this browser" infobar disappears while inactive.
 // 0 disables it (debugger stays attached, infobar always shown).
@@ -73,7 +86,7 @@ function clearTabActivity(tabId) {
   void setTabTitleFrame(tabId, null)
   const tab = tabs.get(tabId)
   if (tab?.state === 'connected' && !tab.idle) {
-    setBadge(tabId, relayWs?.readyState === WebSocket.OPEN ? 'on' : 'connecting')
+    setBadge(tabId, (relayWs?.readyState === WebSocket.OPEN || remoteConnected()) ? 'on' : 'connecting')
   }
 }
 
@@ -81,10 +94,12 @@ function clearTabActivity(tabId) {
 let relayWs = null
 /** @type {Promise<void>|null} */
 let relayConnectPromise = null
+let relayConnectCancel = null
 /** @type {WebSocket|null} */
 let remoteWs = null
 /** @type {Promise<void>|null} */
 let remoteConnectPromise = null
+let remoteConnectCancel = null
 let remoteReconnectTimer = null
 let remoteConfig = null
 let remoteConnectedAt = null
@@ -137,6 +152,37 @@ const idleDetaching = new Set()
 let reconnectAttempt = 0
 let reconnectTimer = null
 let lastConnectError = null
+let localBridgeCompatibility = null
+let localControlEnabled = false
+let remoteControlEnabled = false
+let localConnectionGeneration = 0
+let remoteConnectionGeneration = 0
+let localControlOperationGeneration = 0
+let remoteControlOperationGeneration = 0
+let remoteControlCandidateOrigin = null
+let remoteCandidateOperation = 0
+let remoteCandidatePreviousState = null
+let localStateMutation = Promise.resolve()
+let remoteStateMutation = Promise.resolve()
+let remotePermissionMutation = Promise.resolve()
+
+function anyControlModeEnabled() {
+  return localControlEnabled || remoteControlEnabled
+}
+
+function serializeMutation(queueName, fn) {
+  const previous = queueName === 'local'
+    ? localStateMutation
+    : queueName === 'remote'
+      ? remoteStateMutation
+      : remotePermissionMutation
+  const current = previous.then(fn, fn)
+  const settled = current.then(() => undefined, () => undefined)
+  if (queueName === 'local') localStateMutation = settled
+  else if (queueName === 'remote') remoteStateMutation = settled
+  else remotePermissionMutation = settled
+  return current
+}
 
 async function getRelayPort() {
   const stored = await chrome.storage.local.get(['relayPort'])
@@ -161,6 +207,209 @@ async function getIdleDetachMs() {
   }
 
   return n * 1000 // 0 => idle-detach disabled
+}
+
+const CONSENT_STORAGE_KEYS = [
+  'localControlEnabled',
+  'localConsentVersion',
+  'localConsentAcceptedAt',
+  'localMigrationPending',
+  'localOnboardingPending',
+  'remoteControlEnabled',
+  'remoteDisclosureVersion',
+  'remoteDisclosureAcceptedAt',
+  'remoteMigrationPending',
+  'remoteHost',
+  'remoteOptionalHostOrigin',
+  'remoteHostPermissionCleanupOrigins',
+  ...REMOTE_CAPABILITY_KEYS,
+]
+
+async function hasRemoteHostAccess(host) {
+  const config = remoteHostConfig(host)
+  if (!config.requiresOptionalHostPermission) return true
+  return await chrome.permissions.contains({ origins: [config.permissionOrigin] })
+}
+
+function optionalRemoteHostOrigin(host) {
+  try {
+    const config = remoteHostConfig(host || DEFAULT_REMOTE_HOST)
+    return config.requiresOptionalHostPermission ? config.permissionOrigin : null
+  } catch {
+    return null
+  }
+}
+
+function isCustomRemotePermissionOrigin(origin) {
+  try {
+    const url = new URL(String(origin || '').replace(/\*$/, ''))
+    return url.protocol === 'https:'
+      && !['relay.linso.ai', 'localhost', '127.0.0.1'].includes(url.hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
+async function cleanupRemoteHostPermissions(origins = [], { activeOrigin = null, candidateOrigin = null } = {}) {
+  return await serializeMutation('permission', async () => {
+    const stored = await chrome.storage.local.get(['remoteHostPermissionCleanupOrigins'])
+    const pending = new Set([
+      ...(Array.isArray(stored.remoteHostPermissionCleanupOrigins) ? stored.remoteHostPermissionCleanupOrigins : []),
+      ...origins,
+    ].filter(Boolean))
+    const errors = []
+    const protectedValue = typeof activeOrigin === 'function' ? await activeOrigin() : activeOrigin
+    const activeOrigins = new Set(
+      protectedValue instanceof Set
+        ? protectedValue
+        : Array.isArray(protectedValue)
+          ? protectedValue
+          : [protectedValue].filter(Boolean),
+    )
+    const candidateValue = typeof candidateOrigin === 'function' ? await candidateOrigin() : candidateOrigin
+    const candidateOrigins = new Set(
+      candidateValue instanceof Set
+        ? candidateValue
+        : Array.isArray(candidateValue)
+          ? candidateValue
+          : [candidateValue].filter(Boolean),
+    )
+
+    for (const origin of [...pending]) {
+      // A candidate is not durable yet: keep it pending so a worker restart can
+      // clean it. A committed active origin is durable elsewhere, so it can be
+      // removed from the pending ledger without revoking the permission.
+      if (candidateOrigins.has(origin)) continue
+      if (activeOrigins.has(origin)) {
+        pending.delete(origin)
+        continue
+      }
+      try {
+        await chrome.permissions.remove({ origins: [origin] })
+        const stillGranted = await chrome.permissions.contains({ origins: [origin] })
+        if (stillGranted) throw new Error(`Chrome kept the optional permission for ${origin}`)
+        pending.delete(origin)
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error))
+      }
+    }
+
+    if (pending.size) {
+      await chrome.storage.local.set({ remoteHostPermissionCleanupOrigins: [...pending] })
+    } else {
+      await chrome.storage.local.remove(['remoteHostPermissionCleanupOrigins'])
+    }
+    return { ok: pending.size === 0, pending: [...pending], errors }
+  })
+}
+
+async function clearRemoteHostPermissionCandidates(origins = []) {
+  return await serializeMutation('permission', async () => {
+    const stored = await chrome.storage.local.get(['remoteHostPermissionCleanupOrigins'])
+    const pending = new Set(
+      Array.isArray(stored.remoteHostPermissionCleanupOrigins)
+        ? stored.remoteHostPermissionCleanupOrigins
+        : [],
+    )
+    for (const origin of origins.filter(Boolean)) pending.delete(origin)
+    if (pending.size) await chrome.storage.local.set({ remoteHostPermissionCleanupOrigins: [...pending] })
+    else await chrome.storage.local.remove(['remoteHostPermissionCleanupOrigins'])
+    return [...pending]
+  })
+}
+
+async function registerRemoteHostPermissionCandidates(origins = []) {
+  return await serializeMutation('permission', async () => {
+    const stored = await chrome.storage.local.get([
+      'remoteControlEnabled',
+      'remoteOptionalHostOrigin',
+      'remoteHost',
+      'remoteHostPermissionCleanupOrigins',
+    ])
+    const activeOrigin = stored.remoteControlEnabled
+      ? (stored.remoteOptionalHostOrigin || optionalRemoteHostOrigin(stored.remoteHost))
+      : null
+    const pending = new Set(
+      Array.isArray(stored.remoteHostPermissionCleanupOrigins)
+        ? stored.remoteHostPermissionCleanupOrigins
+        : [],
+    )
+    for (const origin of origins.filter(isCustomRemotePermissionOrigin)) {
+      if (origin !== activeOrigin) pending.add(origin)
+    }
+    if (pending.size) await chrome.storage.local.set({ remoteHostPermissionCleanupOrigins: [...pending] })
+    else await chrome.storage.local.remove(['remoteHostPermissionCleanupOrigins'])
+    return [...pending]
+  })
+}
+
+async function enforceConsentState(reason = 'startup') {
+  const stored = await chrome.storage.local.get(CONSENT_STORAGE_KEYS)
+  const plan = buildConsentMigration(stored, { reason })
+  const previousOptionalOrigin = stored.remoteOptionalHostOrigin
+    || optionalRemoteHostOrigin(stored.remoteHost)
+
+  if (Object.keys(plan.updates).length) await chrome.storage.local.set(plan.updates)
+  if (plan.remove.length) await chrome.storage.local.remove(plan.remove)
+
+  if (!plan.remoteDisclosureCurrent && previousOptionalOrigin) {
+    await chrome.storage.local.remove(['remoteOptionalHostOrigin'])
+    await cleanupRemoteHostPermissions([previousOptionalOrigin])
+  }
+
+  let remoteEnabled = plan.remoteEnabled
+  if (remoteEnabled) {
+    try {
+      if (!await hasRemoteHostAccess(stored.remoteHost || DEFAULT_REMOTE_HOST)) {
+        throw new Error('The optional permission for this Remote Host was removed.')
+      }
+    } catch (error) {
+      remoteEnabled = false
+      remoteLastError = error instanceof Error ? error.message : String(error)
+      await chrome.storage.local.set({ remoteControlEnabled: false })
+      await chrome.storage.local.remove(REMOTE_CAPABILITY_KEYS)
+      if (previousOptionalOrigin) {
+        await chrome.storage.local.remove(['remoteOptionalHostOrigin'])
+        await cleanupRemoteHostPermissions([previousOptionalOrigin])
+      }
+    }
+  }
+
+  let activeOrigin = null
+  if (remoteEnabled) {
+    activeOrigin = optionalRemoteHostOrigin(stored.remoteHost)
+    if (activeOrigin) await chrome.storage.local.set({ remoteOptionalHostOrigin: activeOrigin })
+    else await chrome.storage.local.remove(['remoteOptionalHostOrigin'])
+  }
+  await cleanupRemoteHostPermissions([], { activeOrigin })
+
+  localControlEnabled = plan.localEnabled
+  remoteControlEnabled = remoteEnabled
+  return { ...plan, remoteEnabled }
+}
+
+async function discardPersistedTabSessions() {
+  let entries = []
+  try {
+    const stored = await chrome.storage.session.get(['persistedTabs'])
+    entries = Array.isArray(stored.persistedTabs) ? stored.persistedTabs : []
+  } catch { /* storage.session may be unavailable */ }
+
+  for (const entry of entries) {
+    if (!Number.isInteger(entry?.tabId)) continue
+    try { await chrome.debugger.detach({ tabId: entry.tabId }) } catch { /* already detached */ }
+    setBadge(entry.tabId, 'off')
+    void chrome.action.setTitle({ tabId: entry.tabId, title: 'Browser Relay: permission required' })
+  }
+  try { await chrome.storage.session.remove(['persistedTabs', 'nextSession']) } catch { /* ignore */ }
+}
+
+async function initializeExtensionState() {
+  const consent = await enforceConsentState('startup')
+  if (consent.localEnabled || consent.remoteEnabled) await rehydrateState()
+  else await discardPersistedTabSessions()
+  await refreshDownloadEventListeners()
+  return consent
 }
 
 function setBadge(tabId, kind) {
@@ -237,10 +486,12 @@ async function rehydrateState() {
 }
 
 async function ensureRelayConnection() {
+  if (!localControlEnabled) throw new Error('Local control requires explicit consent in Browser Relay Options')
   if (relayWs && relayWs.readyState === WebSocket.OPEN) return
   if (relayConnectPromise) return await relayConnectPromise
 
-  relayConnectPromise = (async () => {
+  const generation = localConnectionGeneration
+  const connectPromise = (async () => {
     const port = await getRelayPort()
     const httpBase = `http://127.0.0.1:${port}`
     const wsUrl = `ws://127.0.0.1:${port}/extension`
@@ -252,20 +503,31 @@ async function ensureRelayConnection() {
     } catch (err) {
       throw new Error(`Relay server not reachable at ${httpBase}`)
     }
+    if (!localControlEnabled || generation !== localConnectionGeneration) {
+      throw new Error('Local control was disabled during connection')
+    }
 
-    // The npm package ships the relay and this extension together: a version
-    // mismatch means the unpacked extension files on disk were updated by an
-    // npm upgrade while Chrome kept the old code in memory. Reload once per
-    // relay version to pick up the new files — the guard prevents a reload
-    // loop when the extension is loaded from elsewhere (e.g. a dev checkout).
     const myVersion = chrome.runtime.getManifest().version
-    if (relayInfo?.version && relayInfo.version !== myVersion) {
-      const stored = await chrome.storage.local.get('reloadedForRelayVersion')
-      if (stored.reloadedForRelayVersion !== relayInfo.version) {
-        await chrome.storage.local.set({ reloadedForRelayVersion: relayInfo.version })
-        chrome.runtime.reload()
-        throw new Error('Reloading extension to pick up new version')
-      }
+    localBridgeCompatibility = bridgeCompatibility({
+      localVersion: myVersion,
+      peerVersion: relayInfo?.version,
+      peerProtocol: relayInfo?.bridgeProtocol,
+      peerCapabilities: relayInfo?.capabilities,
+    })
+    if (!localBridgeCompatibility.compatible) {
+      throw new Error(localBridgeCompatibility.reason || 'The local daemon uses an incompatible Browser Relay bridge protocol.')
+    }
+
+    const hello = {
+      method: 'BrowserRelay.hello',
+      params: {
+        version: myVersion,
+        protocol: BRIDGE_PROTOCOL,
+        capabilities: [
+          ...BRIDGE_BASE_CAPABILITIES,
+          ...(await hasDownloadsPermission() ? ['downloads'] : []),
+        ],
+      },
     }
 
     const ws = new WebSocket(wsUrl)
@@ -276,26 +538,53 @@ async function ensureRelayConnection() {
       void whenReady(() => onRelayMessage(String(event.data || '')))
     }
 
-    await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('WebSocket connect timeout')), 5000)
-      ws.onopen = () => { clearTimeout(t); resolve() }
-      ws.onerror = () => { clearTimeout(t); reject(new Error('WebSocket connect failed')) }
-      ws.onclose = (ev) => { clearTimeout(t); reject(new Error(`WebSocket closed (${ev.code})`)) }
-    })
+    let cancelPending = null
+    try {
+      await new Promise((resolve, reject) => {
+        let settled = false
+        const finish = (fn, value) => {
+          if (settled) return
+          settled = true
+          clearTimeout(t)
+          fn(value)
+        }
+        const t = setTimeout(() => finish(reject, new Error('WebSocket connect timeout')), 5000)
+        cancelPending = (error) => finish(reject, error)
+        relayConnectCancel = cancelPending
+        ws.onopen = () => {
+          try {
+            ws.send(JSON.stringify(hello))
+            finish(resolve)
+          } catch (error) {
+            finish(reject, error instanceof Error ? error : new Error(String(error)))
+          }
+        }
+        ws.onerror = () => finish(reject, new Error('WebSocket connect failed'))
+        ws.onclose = (ev) => finish(reject, new Error(`WebSocket closed (${ev.code})`))
+      })
+    } finally {
+      if (relayConnectCancel === cancelPending) relayConnectCancel = null
+    }
+
+    if (!localControlEnabled || generation !== localConnectionGeneration) {
+      try { ws.close() } catch { /* ignore */ }
+      throw new Error('Local control was disabled during connection')
+    }
 
     ws.onclose = () => { if (ws !== relayWs) return; onRelayClosed('closed') }
     ws.onerror = () => { if (ws !== relayWs) return; onRelayClosed('error') }
   })()
+  relayConnectPromise = connectPromise
 
   try {
-    await relayConnectPromise
+    await connectPromise
     reconnectAttempt = 0
     lastConnectError = null
   } catch (err) {
     lastConnectError = err instanceof Error ? err.message : String(err)
     throw err
   } finally {
-    relayConnectPromise = null
+    if (relayConnectPromise === connectPromise) relayConnectPromise = null
   }
 }
 
@@ -314,10 +603,11 @@ function onRelayClosed(reason) {
       void chrome.action.setTitle({ tabId, title: 'Browser Relay: reconnecting...' })
     }
   }
-  scheduleReconnect()
+  if (localControlEnabled) scheduleReconnect()
 }
 
 function scheduleReconnect() {
+  if (!localControlEnabled) return
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   const delay = Math.min(1000 * Math.pow(2, reconnectAttempt), 30000)
   reconnectAttempt++
@@ -342,6 +632,122 @@ function scheduleReconnect() {
 function cancelReconnect() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   reconnectAttempt = 0
+}
+
+function closeLocalRelay() {
+  localConnectionGeneration++
+  cancelReconnect()
+  const cancelConnect = relayConnectCancel
+  relayConnectCancel = null
+  if (cancelConnect) cancelConnect(new Error('Local control changed during connection'))
+  const ws = relayWs
+  relayWs = null
+  relayConnectPromise = null
+  if (ws) {
+    try { ws.onclose = null; ws.onerror = null; ws.onmessage = null; ws.close() } catch { /* ignore */ }
+  }
+  for (const [id, pendingRequest] of pending.entries()) {
+    pending.delete(id)
+    pendingRequest.reject(new Error('Local control was disabled'))
+  }
+  reattachPending.clear()
+}
+
+async function announceLocalBridge() {
+  const ws = relayWs
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false
+  ws.send(JSON.stringify({
+    method: 'BrowserRelay.hello',
+    params: {
+      version: chrome.runtime.getManifest().version,
+      protocol: BRIDGE_PROTOCOL,
+      capabilities: [
+        ...BRIDGE_BASE_CAPABILITIES,
+        ...(await hasDownloadsPermission() ? ['downloads'] : []),
+      ],
+    },
+  }))
+  return true
+}
+
+async function detachAllControlledTabs(reason) {
+  for (const tabId of [...tabs.keys()]) await detachTab(tabId, reason)
+  tabs.clear()
+  tabBySession.clear()
+  childSessionToTab.clear()
+  consoleEntries = []
+  networkEntries = []
+  consoleCaptureTabs.clear()
+  networkCaptureTabs.clear()
+  try { await chrome.storage.session.remove(['persistedTabs', 'nextSession']) } catch { /* ignore */ }
+}
+
+async function enableLocalControl() {
+  const operation = ++localControlOperationGeneration
+  const now = Date.now()
+  closeLocalRelay()
+  localControlEnabled = true
+  try {
+    const started = await serializeMutation('local', async () => {
+      if (operation !== localControlOperationGeneration) return false
+      await chrome.storage.local.set({
+        localControlEnabled: false,
+        localConsentVersion: LOCAL_CONSENT_VERSION,
+        localConsentAcceptedAt: now,
+        localMigrationPending: false,
+        localOnboardingPending: false,
+      })
+      return operation === localControlOperationGeneration
+    })
+    if (!started) return { connected: false, superseded: true, lastError: 'A newer Local control request replaced this one.' }
+    await ensureRelayConnection()
+    if (operation !== localControlOperationGeneration) {
+      return { connected: false, superseded: true, lastError: 'A newer Local control request replaced this one.' }
+    }
+    await recoverRelaySession()
+    const committed = await serializeMutation('local', async () => {
+      if (operation !== localControlOperationGeneration) return false
+      await chrome.storage.local.set({ localControlEnabled: true })
+      return operation === localControlOperationGeneration
+    })
+    if (!committed) return { connected: false, superseded: true, lastError: 'A newer Local control request replaced this one.' }
+    return { connected: true, lastError: null }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    if (operation !== localControlOperationGeneration) {
+      return { connected: false, superseded: true, lastError: errorMessage }
+    }
+    localControlEnabled = false
+    closeLocalRelay()
+    try {
+      await serializeMutation('local', async () => {
+        if (operation === localControlOperationGeneration) {
+          await chrome.storage.local.set({ localControlEnabled: false })
+        }
+      })
+    } catch { /* keep runtime disabled */ }
+    if (operation !== localControlOperationGeneration) {
+      return { connected: false, superseded: true, lastError: errorMessage }
+    }
+    if (!anyControlModeEnabled()) await detachAllControlledTabs('local_enable_failed')
+    lastConnectError = errorMessage
+    return { connected: false, lastError: errorMessage }
+  }
+}
+
+async function disableLocalControl({ migrationPending = false } = {}) {
+  const operation = ++localControlOperationGeneration
+  localControlEnabled = false
+  closeLocalRelay()
+  await serializeMutation('local', async () => {
+    if (operation === localControlOperationGeneration) {
+      await chrome.storage.local.set({ localControlEnabled: false, localMigrationPending: migrationPending })
+    }
+  })
+  if (operation !== localControlOperationGeneration) return { superseded: true }
+  if (!anyControlModeEnabled()) await detachAllControlledTabs('local_control_disabled')
+  lastConnectError = null
+  return { superseded: false }
 }
 
 async function reannounceAttachedTabs() {
@@ -398,6 +804,59 @@ function requestFromRelay(command) {
 }
 
 const DOWNLOAD_CONFLICT_ACTIONS = new Set(['uniquify', 'overwrite', 'prompt'])
+const DOWNLOADS_PERMISSION_ERROR = 'downloads_permission_required: Enable Downloads access in Browser Relay Options.'
+const MAX_DOWNLOAD_EVENTS = 500
+let downloadListenersRegistered = false
+let registeredDownloadApi = null
+let downloadEvents = []
+
+function recordDownloadEvent(type, data) {
+  downloadEvents.push({ type, timestamp: Date.now(), ...data })
+  if (downloadEvents.length > MAX_DOWNLOAD_EVENTS) downloadEvents = downloadEvents.slice(-MAX_DOWNLOAD_EVENTS)
+}
+
+const onDownloadCreated = (item) => void whenReady(() => {
+  recordDownloadEvent('created', { item })
+  forwardDownloadEvent('BrowserRelay.downloadCreated', { item })
+})
+const onDownloadChanged = (delta) => void whenReady(() => {
+  recordDownloadEvent('changed', { delta })
+  forwardDownloadEvent('BrowserRelay.downloadChanged', { delta })
+})
+const onDownloadErased = (downloadId) => void whenReady(() => {
+  recordDownloadEvent('erased', { id: downloadId })
+  forwardDownloadEvent('BrowserRelay.downloadErased', { id: downloadId })
+})
+
+async function hasDownloadsPermission() {
+  return await chrome.permissions.contains({ permissions: ['downloads'] })
+}
+
+async function refreshDownloadEventListeners() {
+  const granted = await hasDownloadsPermission()
+  const api = chrome.downloads
+  if (granted && api && !downloadListenersRegistered) {
+    api.onCreated.addListener(onDownloadCreated)
+    api.onChanged.addListener(onDownloadChanged)
+    api.onErased.addListener(onDownloadErased)
+    downloadListenersRegistered = true
+    registeredDownloadApi = api
+  } else if ((!granted || !api) && downloadListenersRegistered) {
+    const previousApi = registeredDownloadApi || api
+    previousApi?.onCreated.removeListener(onDownloadCreated)
+    previousApi?.onChanged.removeListener(onDownloadChanged)
+    previousApi?.onErased.removeListener(onDownloadErased)
+    downloadListenersRegistered = false
+    registeredDownloadApi = null
+    downloadEvents = []
+  }
+  return granted && !!api
+}
+
+async function requireDownloadsPermission() {
+  if (!await hasDownloadsPermission()) throw new Error(DOWNLOADS_PERMISSION_ERROR)
+  if (!chrome.downloads) throw new Error('downloads_api_unavailable: Reload Browser Relay after granting Downloads access.')
+}
 
 function downloadOptionsFromParams(params = {}) {
   const url = typeof params.url === 'string' ? params.url.trim() : ''
@@ -420,18 +879,14 @@ function downloadOptionsFromParams(params = {}) {
 }
 
 async function startBrowserDownload(params = {}) {
-  if (!chrome.downloads?.download) {
-    throw new Error('chrome.downloads API unavailable. Reload the extension after granting downloads permission.')
-  }
+  await requireDownloadsPermission()
   const options = downloadOptionsFromParams(params)
   const id = await chrome.downloads.download(options)
   return { id, options }
 }
 
 async function searchBrowserDownloads(params = {}) {
-  if (!chrome.downloads?.search) {
-    throw new Error('chrome.downloads API unavailable. Reload the extension after granting downloads permission.')
-  }
+  await requireDownloadsPermission()
 
   const query = {}
   const id = Number(params.id)
@@ -455,6 +910,22 @@ function forwardDownloadEvent(method, params) {
 async function onRelayMessage(text) {
   let msg
   try { msg = JSON.parse(text) } catch { return }
+
+  if (msg?.method === 'BrowserRelay.helloAck') {
+    const params = msg.params || {}
+    localBridgeCompatibility = bridgeCompatibility({
+      localVersion: chrome.runtime.getManifest().version,
+      peerVersion: params.version,
+      peerProtocol: params.protocol,
+      peerCapabilities: params.capabilities,
+    })
+    if (params.compatible === false) {
+      localBridgeCompatibility.compatible = false
+      localBridgeCompatibility.reason = params.reason || localBridgeCompatibility.reason || 'The local daemon rejected the bridge protocol.'
+      lastConnectError = localBridgeCompatibility.reason
+    }
+    return
+  }
 
   if (msg?.method === 'ping') {
     try { sendToRelay({ method: 'pong' }) } catch { /* ignore */ }
@@ -594,7 +1065,7 @@ async function wakeTab(tabId) {
   } catch { /* keep previous targetId */ }
   tab.idle = false
   tab.lastActivity = Date.now()
-  setBadge(tabId, relayWs && relayWs.readyState === WebSocket.OPEN ? 'on' : 'connecting')
+  setBadge(tabId, (relayWs?.readyState === WebSocket.OPEN || remoteConnected()) ? 'on' : 'connecting')
   void chrome.action.setTitle({ tabId, title: 'Browser Relay: attached (click to detach)' })
   await persistState()
 }
@@ -641,6 +1112,7 @@ function isAttachableUrl(url) {
 }
 
 async function autoAttachAllTabs() {
+  if (!localControlEnabled) return
   if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return
   const allTabs = await chrome.tabs.query({})
   for (const tab of allTabs) {
@@ -659,6 +1131,10 @@ async function autoAttachAllTabs() {
 }
 
 async function connectOrToggle() {
+  if (!localControlEnabled) {
+    void chrome.runtime.openOptionsPage()
+    return { ok: false, consentRequired: true }
+  }
   cancelReconnect()
   try {
     await ensureRelayConnection()
@@ -668,6 +1144,7 @@ async function connectOrToggle() {
     console.warn('Connect failed:', message)
     // Popup surfaces lastConnectError + install hint; no need to open options.
   }
+  return { ok: relayWs?.readyState === WebSocket.OPEN, error: lastConnectError }
 }
 
 async function handleForwardCdpCommand(msg) {
@@ -822,10 +1299,10 @@ async function onDebuggerDetach(source, reason) {
       return
     }
 
-    if (!relayWs || relayWs.readyState !== WebSocket.OPEN) {
+    if ((!localControlEnabled || !relayWs || relayWs.readyState !== WebSocket.OPEN) && !remoteConnected()) {
       reattachPending.delete(tabId)
       setBadge(tabId, 'error')
-      void chrome.action.setTitle({ tabId, title: 'Browser Relay: relay disconnected during re-attach' })
+      void chrome.action.setTitle({ tabId, title: 'Browser Relay: control connection lost during re-attach' })
       return
     }
 
@@ -881,11 +1358,16 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => void whenReady(
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => void whenReady(async () => {
   if (changeInfo.status !== 'complete') return
+  const attached = tabs.get(tabId)
+  if (attached?.state === 'connected' && !attached.idle) {
+    setBadge(tabId, (relayWs?.readyState === WebSocket.OPEN || remoteConnected()) ? 'on' : 'connecting')
+    return
+  }
   if (tabs.has(tabId)) return
   if (!isAttachableUrl(tab.url)) return
   if (tabOperationLocks.has(tabId)) return
   if (reattachPending.has(tabId)) return
-  if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return
+  if (!localControlEnabled || !relayWs || relayWs.readyState !== WebSocket.OPEN) return
 
   tabOperationLocks.add(tabId)
   try { await attachTab(tabId) } catch (err) {
@@ -896,31 +1378,47 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => void whenReady(asy
 chrome.debugger.onEvent.addListener((...args) => void whenReady(() => onDebuggerEvent(...args)))
 chrome.debugger.onDetach.addListener((...args) => void whenReady(() => onDebuggerDetach(...args)))
 
-if (chrome.downloads) {
-  chrome.downloads.onCreated.addListener((item) => void whenReady(() => forwardDownloadEvent('BrowserRelay.downloadCreated', { item })))
-  chrome.downloads.onChanged.addListener((delta) => void whenReady(() => forwardDownloadEvent('BrowserRelay.downloadChanged', { delta })))
-  chrome.downloads.onErased.addListener((downloadId) => void whenReady(() => forwardDownloadEvent('BrowserRelay.downloadErased', { id: downloadId })))
-}
+chrome.permissions.onAdded.addListener((permissions) => {
+  if (permissions.permissions?.includes('downloads')) void refreshDownloadEventListeners()
+  if (permissions.origins?.length) {
+    // Register optional origins from the permission event itself. This closes
+    // the MV3 interruption window between Options receiving request() success
+    // and the enable message reaching this service worker. A successful enable
+    // removes the active origin from this queue; startup removes abandoned ones.
+    // Start the storage write directly while handling the permission event,
+    // rather than delaying it behind general connection initialization.
+    void registerRemoteHostPermissionCandidates(permissions.origins).catch(() => {})
+  }
+})
+chrome.permissions.onRemoved.addListener((permissions) => {
+  if (permissions.permissions?.includes('downloads')) void refreshDownloadEventListeners()
+  if (permissions.origins?.length) {
+    void whenReady(() => handleRemovedRemoteHostOrigins(permissions.origins))
+  }
+})
 
 chrome.action.onClicked.addListener(() => void whenReady(() => connectOrToggle()))
-
-chrome.webNavigation.onCompleted.addListener(({ tabId, frameId }) => void whenReady(() => {
-  if (frameId !== 0) return
-  const tab = tabs.get(tabId)
-  if (tab?.state === 'connected' && !tab.idle) {
-    setBadge(tabId, relayWs && relayWs.readyState === WebSocket.OPEN ? 'on' : 'connecting')
-  }
-}))
 
 chrome.tabs.onActivated.addListener(({ tabId }) => void whenReady(() => {
   const tab = tabs.get(tabId)
   if (tab?.state === 'connected' && !tab.idle) {
-    setBadge(tabId, relayWs && relayWs.readyState === WebSocket.OPEN ? 'on' : 'connecting')
+    setBadge(tabId, (relayWs?.readyState === WebSocket.OPEN || remoteConnected()) ? 'on' : 'connecting')
   }
 }))
 
-chrome.runtime.onInstalled.addListener(() => {
-  void chrome.runtime.openOptionsPage()
+chrome.runtime.onInstalled.addListener((details) => {
+  void whenReady(async () => {
+    const consent = await enforceConsentState(details?.reason || 'update')
+    if (details?.reason === 'install' && !consent.localConsentCurrent) {
+      await chrome.storage.local.set({ localOnboardingPending: true })
+    }
+    if (!consent.localEnabled) closeLocalRelay()
+    if (!consent.remoteEnabled) closeRemoteHub({ disable: true })
+    if (!anyControlModeEnabled()) await detachAllControlledTabs('consent_migration')
+    if (details?.reason === 'install' || !consent.localConsentCurrent) {
+      await chrome.runtime.openOptionsPage()
+    }
+  })
 })
 
 chrome.alarms.create('relay-keepalive', { periodInMinutes: 0.5 })
@@ -931,17 +1429,17 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   for (const [tabId, tab] of tabs.entries()) {
     if (tab.state === 'connected' && !tab.idle) {
-      setBadge(tabId, relayWs && relayWs.readyState === WebSocket.OPEN ? 'on' : 'connecting')
+      setBadge(tabId, (relayWs?.readyState === WebSocket.OPEN || remoteConnected()) ? 'on' : 'connecting')
     }
   }
 
-  if (relayWs && relayWs.readyState === WebSocket.OPEN) {
+  if (localControlEnabled && relayWs && relayWs.readyState === WebSocket.OPEN) {
     await autoAttachAllTabs()
   }
 
-  await softDetachIdleTabs()
+  if (anyControlModeEnabled()) await softDetachIdleTabs()
 
-  if (!relayWs || relayWs.readyState !== WebSocket.OPEN) {
+  if (localControlEnabled && (!relayWs || relayWs.readyState !== WebSocket.OPEN)) {
     if (!relayConnectPromise && !reconnectTimer) {
       console.log('Keepalive: WebSocket unhealthy, triggering reconnect')
       try {
@@ -975,19 +1473,28 @@ function remoteConnected() {
   return !!remoteWs && remoteWs.readyState === WebSocket.OPEN && remoteAuthenticated
 }
 
-function remoteWsBase(host) {
-  const h = String(host || DEFAULT_REMOTE_HOST).trim().replace(/\/+$/, '')
-  if (h.startsWith('https://')) return `wss://${h.slice('https://'.length)}`
-  if (h.startsWith('http://')) return `ws://${h.slice('http://'.length)}`
-  if (h.startsWith('wss://') || h.startsWith('ws://')) return h
-  return `wss://${h}`
-}
-
 async function getRemoteConfig() {
-  const s = await chrome.storage.local.get(['remoteControlEnabled', 'remoteHost', 'remoteRouteId', 'remoteSecret', 'remoteDeviceId'])
-  if (!s.remoteControlEnabled || !s.remoteRouteId || !s.remoteSecret) return null
+  const s = await chrome.storage.local.get([
+    'remoteControlEnabled',
+    'remoteDisclosureVersion',
+    'remoteDisclosureAcceptedAt',
+    'remoteHost',
+    ...REMOTE_CAPABILITY_KEYS,
+  ])
+  if (!s.remoteControlEnabled || !hasCurrentRemoteDisclosure(s) || !s.remoteRouteId || !s.remoteSecret) return null
+  let host
+  try {
+    host = remoteHostConfig(s.remoteHost || DEFAULT_REMOTE_HOST)
+    if (!await hasRemoteHostAccess(host.remoteHost)) {
+      remoteLastError = 'The optional permission for this Remote Host is missing.'
+      return null
+    }
+  } catch (error) {
+    remoteLastError = error instanceof Error ? error.message : String(error)
+    return null
+  }
   return {
-    remoteHost: s.remoteHost || DEFAULT_REMOTE_HOST,
+    remoteHost: host.remoteHost,
     remoteRouteId: s.remoteRouteId,
     remoteSecret: s.remoteSecret,
     remoteDeviceId: s.remoteDeviceId,
@@ -996,7 +1503,7 @@ async function getRemoteConfig() {
 
 function remoteStatusPayload() {
   return {
-    enabled: !!remoteConfig,
+    enabled: remoteControlEnabled,
     connected: remoteConnected(),
     deviceId: remoteConfig?.remoteDeviceId || null,
     connectedAt: remoteConnectedAt,
@@ -1009,63 +1516,102 @@ function remoteHubUrl(config) {
   return `${base}/v1/device/connect?routeId=${encodeURIComponent(config.remoteRouteId)}`
 }
 
-async function ensureRemoteHubConnection() {
-  const cfg = await getRemoteConfig()
+async function ensureRemoteHubConnection({ config = null, reconnectOnFailure = true } = {}) {
+  const generation = remoteConnectionGeneration
+  const cfg = config || await getRemoteConfig()
+  if (generation !== remoteConnectionGeneration) return false
   if (!cfg) { remoteConfig = null; return false }
   remoteConfig = cfg
   if (remoteConnected()) return true
   if (remoteConnectPromise) { try { await remoteConnectPromise } catch { /* fall through */ } return remoteConnected() }
 
-  remoteConnectPromise = (async () => {
+  const connectPromise = (async () => {
     const ws = new WebSocket(remoteHubUrl(cfg))
+    if (generation !== remoteConnectionGeneration) {
+      try { ws.close() } catch { /* ignore */ }
+      throw new Error('Remote control changed during connection')
+    }
     remoteWs = ws
     remoteAuthenticated = false
 
-    await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('Hub connect timeout')), 8000)
-      const handleRemoteFrame = createRemoteAuthMessageHandler({
-        onAuthenticated: () => {
+    let cancelPending = null
+    try {
+      await new Promise((resolve, reject) => {
+        let settled = false
+        const finish = (fn, value) => {
+          if (settled) return
+          settled = true
           clearTimeout(t)
-          remoteAuthenticated = true
-          resolve()
-        },
-        onMessage: (text) => { void whenReady(() => handleHubMessage(text)) },
+          fn(value)
+        }
+        const t = setTimeout(() => finish(reject, new Error('Hub connect timeout')), 8000)
+        cancelPending = (error) => finish(reject, error)
+        remoteConnectCancel = cancelPending
+        const handleRemoteFrame = createRemoteAuthMessageHandler({
+          onAuthenticated: () => {
+            if (generation !== remoteConnectionGeneration) {
+              finish(reject, new Error('Remote control changed during connection'))
+              return
+            }
+            remoteAuthenticated = true
+            finish(resolve)
+          },
+          onMessage: (text) => { void whenReady(() => handleHubMessage(text)) },
+        })
+        ws.onmessage = (event) => handleRemoteFrame(String(event.data || ''))
+        ws.onopen = () => {
+          if (generation !== remoteConnectionGeneration) {
+            finish(reject, new Error('Remote control changed during connection'))
+            try { ws.close() } catch { /* ignore */ }
+            return
+          }
+          ws.send(JSON.stringify({ type: 'device.auth', secret: cfg.remoteSecret }))
+        }
+        ws.onerror = () => finish(reject, new Error('Hub connect failed'))
+        ws.onclose = (ev) => finish(reject, new Error(`Hub closed (${ev.code})`))
       })
-      ws.onmessage = (event) => handleRemoteFrame(String(event.data || ''))
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'device.auth', secret: cfg.remoteSecret }))
-      }
-      ws.onerror = () => { clearTimeout(t); reject(new Error('Hub connect failed')) }
-      ws.onclose = (ev) => { clearTimeout(t); reject(new Error(`Hub closed (${ev.code})`)) }
-    })
+    } finally {
+      if (remoteConnectCancel === cancelPending) remoteConnectCancel = null
+    }
 
+    if (generation !== remoteConnectionGeneration) {
+      try { ws.close() } catch { /* ignore */ }
+      throw new Error('Remote control changed during connection')
+    }
+
+    const capabilities = ['tabs', 'eval', 'wait', 'snapshot', 'click', 'type', 'key', 'scroll', 'navigate', 'screenshot', 'console', 'network']
+    if (await hasDownloadsPermission()) capabilities.push('downloads')
     ws.send(JSON.stringify({
       type: 'device.hello',
       version: chrome.runtime.getManifest().version,
+      protocol: BRIDGE_PROTOCOL,
       routeId: cfg.remoteRouteId,
       deviceName: 'Browser Relay',
-      capabilities: ['tabs', 'eval', 'wait', 'snapshot', 'click', 'type', 'key', 'scroll', 'navigate', 'screenshot', 'console', 'network'],
+      capabilities,
     }))
 
     ws.onclose = () => { if (ws !== remoteWs) return; onRemoteHubClosed('closed') }
     ws.onerror = () => { if (ws !== remoteWs) return; onRemoteHubClosed('error') }
   })()
+  remoteConnectPromise = connectPromise
 
   try {
-    await remoteConnectPromise
+    await connectPromise
+    if (generation !== remoteConnectionGeneration) return false
     remoteReconnectAttempt = 0
     remoteConnectedAt = Date.now()
     remoteLastError = null
     return true
   } catch (err) {
+    if (generation !== remoteConnectionGeneration) return false
     remoteLastError = err instanceof Error ? err.message : String(err)
     remoteAuthenticated = false
     try { remoteWs?.close() } catch { /* ignore */ }
     remoteWs = null
-    scheduleRemoteReconnect()
+    if (remoteControlEnabled && reconnectOnFailure) scheduleRemoteReconnect()
     return false
   } finally {
-    remoteConnectPromise = null
+    if (remoteConnectPromise === connectPromise) remoteConnectPromise = null
   }
 }
 
@@ -1074,10 +1620,11 @@ function onRemoteHubClosed(reason) {
   remoteAuthenticated = false
   remoteConnectedAt = null
   remoteLastError = `disconnected (${reason})`
-  scheduleRemoteReconnect()
+  if (remoteControlEnabled) scheduleRemoteReconnect()
 }
 
 function scheduleRemoteReconnect() {
+  if (!remoteControlEnabled) return
   if (remoteReconnectTimer) return
   void getRemoteConfig().then((cfg) => {
     if (!cfg) return // disabled — stop reconnecting
@@ -1091,14 +1638,412 @@ function scheduleRemoteReconnect() {
 }
 
 function closeRemoteHub({ disable = false } = {}) {
+  remoteConnectionGeneration++
   if (remoteReconnectTimer) { clearTimeout(remoteReconnectTimer); remoteReconnectTimer = null }
   remoteReconnectAttempt = 0
+  const cancelConnect = remoteConnectCancel
+  remoteConnectCancel = null
+  if (cancelConnect) cancelConnect(new Error('Remote control changed during connection'))
   const ws = remoteWs
   remoteWs = null
+  remoteConnectPromise = null
   remoteAuthenticated = false
   remoteConnectedAt = null
   if (ws) { try { ws.onclose = null; ws.onerror = null; ws.close() } catch { /* ignore */ } }
-  if (disable) { remoteConfig = null; remoteLastError = null }
+  if (disable) {
+    remoteControlEnabled = false
+    remoteConfig = null
+    remoteLastError = null
+  }
+}
+
+const REMOTE_STATE_KEYS = [
+  'remoteControlEnabled',
+  'remoteDisclosureVersion',
+  'remoteDisclosureAcceptedAt',
+  'remoteMigrationPending',
+  'remoteHost',
+  'remoteOptionalHostOrigin',
+  ...REMOTE_CAPABILITY_KEYS,
+]
+
+function enabledRemoteSnapshot(state = {}) {
+  return state.remoteControlEnabled === true
+    && hasCurrentRemoteDisclosure(state)
+    && hasRemoteCapability(state)
+}
+
+function remoteConfigFromSnapshot(state = {}) {
+  if (!enabledRemoteSnapshot(state)) return null
+  return {
+    remoteHost: remoteHostConfig(state.remoteHost || DEFAULT_REMOTE_HOST).remoteHost,
+    remoteRouteId: state.remoteRouteId,
+    remoteSecret: state.remoteSecret,
+    remoteDeviceId: state.remoteDeviceId,
+  }
+}
+
+async function readRemoteState() {
+  return await serializeMutation('remote', () => chrome.storage.local.get(REMOTE_STATE_KEYS))
+}
+
+async function writeRemoteState(operation, values, remove = []) {
+  return await serializeMutation('remote', async () => {
+    if (operation !== remoteControlOperationGeneration) return false
+    if (Object.keys(values).length) await chrome.storage.local.set(values)
+    if (remove.length) await chrome.storage.local.remove(remove)
+    return operation === remoteControlOperationGeneration
+  })
+}
+
+async function restoreRemoteState(operation, snapshot) {
+  const values = {}
+  const remove = []
+  for (const key of REMOTE_STATE_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(snapshot, key)) values[key] = snapshot[key]
+    else remove.push(key)
+  }
+  return await writeRemoteState(operation, values, remove)
+}
+
+async function currentCommittedRemotePermissionOrigins() {
+  const origins = new Set()
+  if (remoteControlEnabled) {
+    const stored = await chrome.storage.local.get(['remoteOptionalHostOrigin', 'remoteHost'])
+    const active = stored.remoteOptionalHostOrigin || optionalRemoteHostOrigin(stored.remoteHost)
+    if (active) origins.add(active)
+  }
+  return origins
+}
+
+function currentCandidateRemotePermissionOrigins() {
+  return new Set(remoteControlCandidateOrigin ? [remoteControlCandidateOrigin] : [])
+}
+
+function currentRemotePermissionProtection() {
+  return {
+    activeOrigin: currentCommittedRemotePermissionOrigins,
+    candidateOrigin: currentCandidateRemotePermissionOrigins,
+  }
+}
+
+async function cleanupSupersededRemoteOrigin(origin) {
+  if (!origin) return { ok: true, pending: [], errors: [] }
+  return await cleanupRemoteHostPermissions([origin], currentRemotePermissionProtection())
+}
+
+async function handleRemovedRemoteHostOrigins(origins = []) {
+  const removedOrigins = new Set(origins.filter(Boolean))
+  if (!removedOrigins.size) return
+
+  // A custom-host permission can disappear after the final contains() check
+  // but before the candidate capability is durably committed. Track that
+  // in-flight candidate independently from remoteControlEnabled: the previous
+  // mode may still be enabled during replacement, while a first-time candidate
+  // intentionally remains disabled until commit.
+  const candidateOrigin = remoteControlCandidateOrigin
+  const candidateOperation = remoteCandidateOperation
+  const previous = remoteCandidatePreviousState ? { ...remoteCandidatePreviousState } : null
+  if (candidateOrigin && candidateOperation && previous && removedOrigins.has(candidateOrigin)) {
+    const stillGranted = await chrome.permissions.contains({ origins: [candidateOrigin] })
+    if (
+      !stillGranted
+      && remoteControlCandidateOrigin === candidateOrigin
+      && remoteCandidateOperation === candidateOperation
+    ) {
+      const operation = ++remoteControlOperationGeneration
+      remoteCandidateOperation = 0
+      remoteControlCandidateOrigin = null
+      remoteCandidatePreviousState = null
+      closeRemoteHub({ disable: true })
+
+      const previousConfig = remoteConfigFromSnapshot(previous)
+      const previousOrigin = previous.remoteOptionalHostOrigin || optionalRemoteHostOrigin(previous.remoteHost)
+      let canRestorePrevious = false
+      if (previousConfig) {
+        try {
+          canRestorePrevious = await hasRemoteHostAccess(previousConfig.remoteHost)
+        } catch {
+          canRestorePrevious = false
+        }
+      }
+
+      if (operation !== remoteControlOperationGeneration) {
+        await cleanupSupersededRemoteOrigin(candidateOrigin)
+        return
+      }
+
+      if (canRestorePrevious) {
+        const restored = await restoreRemoteState(operation, previous)
+        if (!restored || operation !== remoteControlOperationGeneration) {
+          await cleanupSupersededRemoteOrigin(candidateOrigin)
+          return
+        }
+        remoteControlEnabled = true
+        const restoredConnected = await ensureRemoteHubConnection({ config: previousConfig })
+        if (operation !== remoteControlOperationGeneration) {
+          await cleanupSupersededRemoteOrigin(candidateOrigin)
+          return
+        }
+        if (restoredConnected) {
+          remoteLastError = 'The optional permission for the candidate Remote Host was removed. The previous Remote connection was restored.'
+        }
+      } else {
+        const disabledPrevious = { ...previous, remoteControlEnabled: false }
+        delete disabledPrevious.remoteOptionalHostOrigin
+        for (const key of REMOTE_CAPABILITY_KEYS) delete disabledPrevious[key]
+        const restored = await restoreRemoteState(operation, disabledPrevious)
+        if (!restored || operation !== remoteControlOperationGeneration) {
+          await cleanupSupersededRemoteOrigin(candidateOrigin)
+          return
+        }
+        remoteControlEnabled = false
+        remoteLastError = 'The optional permission for the candidate Remote Host was removed. Remote control was not enabled.'
+        if (!anyControlModeEnabled()) await detachAllControlledTabs('remote_candidate_permission_removed')
+      }
+
+      await cleanupRemoteHostPermissions(
+        [candidateOrigin, canRestorePrevious ? null : previousOrigin].filter(Boolean),
+        currentRemotePermissionProtection(),
+      )
+      return
+    }
+  }
+
+  if (!remoteControlEnabled) return
+  const stored = await chrome.storage.local.get(['remoteOptionalHostOrigin', 'remoteHost'])
+  const activeOrigin = stored.remoteOptionalHostOrigin || optionalRemoteHostOrigin(stored.remoteHost)
+  if (!activeOrigin || !removedOrigins.has(activeOrigin)) return
+  if (await chrome.permissions.contains({ origins: [activeOrigin] })) return
+  await disableRemoteControl()
+  remoteLastError = 'The optional permission for the active Remote Host was removed.'
+}
+
+async function enableRemoteControl(message) {
+  const operation = ++remoteControlOperationGeneration
+  const cancelledPriorCandidate = remoteCandidateOperation !== 0
+  if (cancelledPriorCandidate) closeRemoteHub()
+  remoteCandidateOperation = 0
+  remoteControlCandidateOrigin = null
+  remoteCandidatePreviousState = null
+  let host = null
+  let candidateOrigin = null
+  let candidateStarted = false
+  let previous = {}
+  let previousConfig = null
+  let previousOrigin = null
+
+  try {
+    // Snapshot the last committed state before validating untrusted message
+    // fields. Malformed or incomplete requests must not clear a working mode.
+    previous = await readRemoteState()
+    previousConfig = remoteConfigFromSnapshot(previous)
+    previousOrigin = previous.remoteOptionalHostOrigin || optionalRemoteHostOrigin(previous.remoteHost)
+    if (operation !== remoteControlOperationGeneration) {
+      return { connected: false, superseded: true, lastError: 'A newer Remote control request replaced this one.' }
+    }
+
+    if (message.disclosureConfirmed !== true) {
+      throw new Error('Remote control requires explicit data-disclosure confirmation.')
+    }
+    host = remoteHostConfig(message.remoteHost || DEFAULT_REMOTE_HOST)
+    candidateOrigin = host.requiresOptionalHostPermission ? host.permissionOrigin : null
+    remoteControlCandidateOrigin = candidateOrigin
+
+    if (!await hasRemoteHostAccess(host.remoteHost)) {
+      throw new Error('Remote Host permission was not granted.')
+    }
+    if (candidateOrigin) await registerRemoteHostPermissionCandidates([candidateOrigin])
+    if (!message.routeId || !message.secret || !message.remoteDeviceId) {
+      throw new Error('Remote capability is incomplete.')
+    }
+    if (operation !== remoteControlOperationGeneration) {
+      await cleanupSupersededRemoteOrigin(candidateOrigin)
+      return { connected: false, superseded: true, lastError: 'A newer Remote control request replaced this one.' }
+    }
+
+    const candidate = {
+      remoteHost: host.remoteHost,
+      remoteRouteId: String(message.routeId),
+      remoteSecret: String(message.secret),
+      remoteDeviceId: String(message.remoteDeviceId),
+    }
+    closeRemoteHub()
+    candidateStarted = true
+    remoteCandidateOperation = operation
+    remoteCandidatePreviousState = { ...previous }
+    const connected = await ensureRemoteHubConnection({ config: candidate, reconnectOnFailure: false })
+    if (operation !== remoteControlOperationGeneration) {
+      await cleanupSupersededRemoteOrigin(candidateOrigin)
+      return { connected: false, superseded: true, lastError: 'A newer Remote control request replaced this one.' }
+    }
+    if (!connected) throw new Error(remoteLastError || 'Remote Hub connection failed.')
+    if (!await hasRemoteHostAccess(host.remoteHost)) {
+      throw new Error('Remote Host permission was removed during connection.')
+    }
+    if (operation !== remoteControlOperationGeneration) {
+      await cleanupSupersededRemoteOrigin(candidateOrigin)
+      return { connected: false, superseded: true, lastError: 'A newer Remote control request replaced this one.' }
+    }
+
+    const committed = await writeRemoteState(operation, {
+      remoteControlEnabled: true,
+      remoteDisclosureVersion: REMOTE_DISCLOSURE_VERSION,
+      remoteDisclosureAcceptedAt: Date.now(),
+      remoteMigrationPending: false,
+      remoteHost: host.remoteHost,
+      remoteRouteId: candidate.remoteRouteId,
+      remoteSecret: candidate.remoteSecret,
+      remoteDeviceId: candidate.remoteDeviceId,
+      ...(candidateOrigin ? { remoteOptionalHostOrigin: candidateOrigin } : {}),
+    }, candidateOrigin ? [] : ['remoteOptionalHostOrigin'])
+    if (!committed) {
+      await cleanupSupersededRemoteOrigin(candidateOrigin)
+      return { connected: false, superseded: true, lastError: 'A newer Remote control request replaced this one.' }
+    }
+
+    remoteControlEnabled = true
+    if (candidateOrigin) await clearRemoteHostPermissionCandidates([candidateOrigin])
+    if (operation !== remoteControlOperationGeneration) {
+      return { connected: false, superseded: true, lastError: 'The Remote Host permission changed during commit.' }
+    }
+    remoteCandidateOperation = 0
+    remoteControlCandidateOrigin = null
+    remoteCandidatePreviousState = null
+    const cleanup = await cleanupRemoteHostPermissions(
+      previousOrigin && previousOrigin !== candidateOrigin ? [previousOrigin] : [],
+      currentRemotePermissionProtection(),
+    )
+    return {
+      connected: true,
+      enabled: true,
+      lastError: null,
+      permissionCleanupPending: !cleanup.ok,
+      permissionCleanupErrors: cleanup.errors,
+    }
+  } catch (error) {
+    const lastError = error instanceof Error ? error.message : String(error)
+    if (operation !== remoteControlOperationGeneration) {
+      await cleanupSupersededRemoteOrigin(candidateOrigin)
+      return { connected: false, superseded: true, lastError }
+    }
+
+    if (previousConfig && !candidateStarted) {
+      // Validation failed before the working connection was touched. Preserve
+      // it exactly; only revoke a newly granted, unused candidate permission.
+      remoteControlCandidateOrigin = null
+      remoteCandidatePreviousState = null
+      const restoredConnected = cancelledPriorCandidate
+        ? await ensureRemoteHubConnection({ config: previousConfig })
+        : remoteConnected()
+      const cleanup = await cleanupRemoteHostPermissions(
+        candidateOrigin && candidateOrigin !== previousOrigin ? [candidateOrigin] : [],
+        currentRemotePermissionProtection(),
+      )
+      return {
+        connected: false,
+        enabled: true,
+        restored: true,
+        restoredConnected,
+        remoteHost: previousConfig.remoteHost,
+        remoteDeviceId: previousConfig.remoteDeviceId,
+        lastError,
+        permissionCleanupPending: !cleanup.ok,
+        permissionCleanupErrors: cleanup.errors,
+      }
+    }
+
+    if (candidateStarted) closeRemoteHub()
+    remoteCandidateOperation = 0
+    remoteCandidatePreviousState = null
+    if (previousConfig) {
+      const restored = await restoreRemoteState(operation, previous)
+      if (!restored || operation !== remoteControlOperationGeneration) {
+        await cleanupSupersededRemoteOrigin(candidateOrigin)
+        return { connected: false, superseded: true, lastError }
+      }
+      remoteControlEnabled = true
+      remoteControlCandidateOrigin = null
+      const restoredConnected = await ensureRemoteHubConnection({ config: previousConfig })
+      const cleanup = await cleanupRemoteHostPermissions(
+        candidateOrigin && candidateOrigin !== previousOrigin ? [candidateOrigin] : [],
+        currentRemotePermissionProtection(),
+      )
+      return {
+        connected: false,
+        enabled: true,
+        restored: true,
+        restoredConnected,
+        remoteHost: previousConfig.remoteHost,
+        remoteDeviceId: previousConfig.remoteDeviceId,
+        lastError,
+        permissionCleanupPending: !cleanup.ok,
+        permissionCleanupErrors: cleanup.errors,
+      }
+    }
+
+    closeRemoteHub({ disable: true })
+    remoteCandidateOperation = 0
+    remoteControlCandidateOrigin = null
+    remoteCandidatePreviousState = null
+    const failureValues = {
+      remoteControlEnabled: false,
+      ...(host ? {
+        remoteDisclosureVersion: REMOTE_DISCLOSURE_VERSION,
+        remoteDisclosureAcceptedAt: Date.now(),
+        remoteMigrationPending: false,
+        remoteHost: host.remoteHost,
+      } : {}),
+    }
+    const committed = await writeRemoteState(
+      operation,
+      failureValues,
+      [...REMOTE_CAPABILITY_KEYS, 'remoteOptionalHostOrigin'],
+    )
+    if (!committed || operation !== remoteControlOperationGeneration) {
+      await cleanupSupersededRemoteOrigin(candidateOrigin)
+      return { connected: false, superseded: true, lastError }
+    }
+    const cleanup = await cleanupRemoteHostPermissions(
+      [candidateOrigin, previousOrigin].filter(Boolean),
+      currentRemotePermissionProtection(),
+    )
+    if (!anyControlModeEnabled()) await detachAllControlledTabs('remote_enable_failed')
+    return {
+      connected: false,
+      enabled: false,
+      lastError,
+      permissionCleanupPending: !cleanup.ok,
+      permissionCleanupErrors: cleanup.errors,
+    }
+  }
+}
+
+async function disableRemoteControl() {
+  const operation = ++remoteControlOperationGeneration
+  remoteCandidateOperation = 0
+  remoteControlCandidateOrigin = null
+  remoteCandidatePreviousState = null
+  const stored = await readRemoteState()
+  const origin = stored.remoteOptionalHostOrigin || optionalRemoteHostOrigin(stored.remoteHost)
+  closeRemoteHub({ disable: true })
+  const committed = await writeRemoteState(
+    operation,
+    { remoteControlEnabled: false },
+    [...REMOTE_CAPABILITY_KEYS, 'remoteOptionalHostOrigin'],
+  )
+  if (!committed || operation !== remoteControlOperationGeneration) {
+    await cleanupSupersededRemoteOrigin(origin)
+    return { ok: false, superseded: true, permissionCleanupPending: false, lastError: null }
+  }
+  const cleanup = await cleanupRemoteHostPermissions(origin ? [origin] : [], currentRemotePermissionProtection())
+  if (!anyControlModeEnabled()) await detachAllControlledTabs('remote_control_disabled')
+  return {
+    ok: cleanup.ok,
+    superseded: false,
+    permissionCleanupPending: !cleanup.ok,
+    lastError: cleanup.errors.join('; ') || null,
+  }
 }
 
 // Execute one rpc.request from the hub, reply with rpc.response.
@@ -1191,6 +2136,22 @@ async function executeRemoteApi(method, path, body) {
   if (method === 'POST' && p === '/api/console/clear') return { status: 200, body: await apiConsoleClear(payload) }
   if (method === 'GET' && p === '/api/network') return { status: 200, body: await apiNetwork(payload, u.searchParams) }
   if (method === 'POST' && p === '/api/network/clear') return { status: 200, body: await apiNetworkClear(payload) }
+  if (method === 'POST' && p === '/api/download/start') {
+    return { status: 200, body: { ok: true, ...await startBrowserDownload(payload) } }
+  }
+  if (method === 'GET' && p === '/api/downloads') {
+    const result = await searchBrowserDownloads(Object.fromEntries(u.searchParams.entries()))
+    const limit = boundInt(u.searchParams.get('limit'), 100, 0, 1000)
+    return {
+      status: 200,
+      body: { ok: true, ...result, events: limit === 0 ? [] : downloadEvents.slice(-limit) },
+    }
+  }
+  if (method === 'POST' && p === '/api/downloads/clear') {
+    const cleared = downloadEvents.length
+    downloadEvents = []
+    return { status: 200, body: { ok: true, cleared } }
+  }
 
   return apiError('unknown_endpoint', `Unknown or not-yet-supported remote endpoint: ${method} ${p}`, 404)
 }
@@ -1708,49 +2669,108 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg?.type === 'getStatus') {
     ;(async () => {
+      await initPromise
       const port = await getRelayPort()
-      const connected = relayWs?.readyState === WebSocket.OPEN
+      const enabled = localControlEnabled
+      const connected = enabled && relayWs?.readyState === WebSocket.OPEN
       const connecting = !connected && (
-        relayConnectPromise !== null ||
+        enabled && (relayConnectPromise !== null ||
         relayWs?.readyState === WebSocket.CONNECTING ||
-        reconnectTimer !== null
+        reconnectTimer !== null)
       )
       let attachedCount = 0
       for (const t of tabs.values()) if (t.state === 'connected') attachedCount++
       const { version } = chrome.runtime.getManifest()
-      sendResponse({ connected, connecting, port, attachedCount, lastError: lastConnectError, version })
+      const consent = await chrome.storage.local.get(['localConsentVersion', 'localConsentAcceptedAt', 'localMigrationPending'])
+      sendResponse({
+        enabled,
+        consentRequired: !enabled,
+        migrationPending: !!consent.localMigrationPending,
+        connected,
+        connecting,
+        port,
+        attachedCount,
+        lastError: lastConnectError,
+        version,
+        daemonVersion: localBridgeCompatibility?.peerVersion || null,
+        compatibility: localBridgeCompatibility,
+      })
     })()
     return true
   }
 
   if (msg?.type === 'reconnect') {
     ;(async () => {
-      await connectOrToggle()
-      sendResponse({ ok: true, error: lastConnectError })
+      const result = await connectOrToggle()
+      sendResponse(result)
     })()
     return true
   }
 
-  // options.js drives External Control through these three messages. It has
-  // already written the capability to chrome.storage.local before enabling.
-  if (msg?.type === 'enableRemoteControl') {
+  if (msg?.type === 'enableLocalControl') {
+    ;(async () => sendResponse(await enableLocalControl()))()
+    return true
+  }
+
+  if (msg?.type === 'disableLocalControl') {
     ;(async () => {
-      closeRemoteHub() // drop any stale connection (e.g. on Regenerate)
-      const connected = await ensureRemoteHubConnection()
-      sendResponse({ connected, lastError: remoteLastError })
+      await disableLocalControl()
+      sendResponse({ ok: true })
     })()
+    return true
+  }
+
+  if (msg?.type === 'downloadsPermissionChanged') {
+    ;(async () => {
+      const enabled = await refreshDownloadEventListeners()
+      await announceLocalBridge().catch(() => false)
+      sendResponse({ enabled })
+    })()
+    return true
+  }
+
+  if (msg?.type === 'registerRemoteHostPermissionCandidate') {
+    ;(async () => {
+      try {
+        const host = remoteHostConfig(msg.remoteHost || DEFAULT_REMOTE_HOST)
+        if (!host.requiresOptionalHostPermission) {
+          sendResponse({ ok: true, origin: null })
+          return
+        }
+        if (!await hasRemoteHostAccess(host.remoteHost)) {
+          throw new Error('Remote Host permission was not granted.')
+        }
+        await registerRemoteHostPermissionCandidates([host.permissionOrigin])
+        sendResponse({ ok: true, origin: host.permissionOrigin })
+      } catch (error) {
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    })()
+    return true
+  }
+
+  if (msg?.type === 'enableRemoteControl') {
+    ;(async () => sendResponse(await enableRemoteControl(msg)))()
     return true
   }
 
   if (msg?.type === 'disableRemoteControl') {
-    closeRemoteHub({ disable: true })
-    sendResponse({ ok: true })
+    ;(async () => sendResponse(await disableRemoteControl()))()
+    return true
+  }
+
+  if (msg?.type === 'retryRemoteHostPermissionCleanup') {
+    ;(async () => {
+      const cleanup = await cleanupRemoteHostPermissions([], currentRemotePermissionProtection())
+      sendResponse({ ok: cleanup.ok, pending: cleanup.pending, lastError: cleanup.errors.join('; ') || null })
+    })()
     return true
   }
 
   if (msg?.type === 'getRemoteControlStatus') {
     ;(async () => {
-      if (!remoteConnected()) await ensureRemoteHubConnection().catch(() => {})
+      await initPromise
+      if (remoteControlEnabled && !remoteConnected()) await ensureRemoteHubConnection().catch(() => {})
       sendResponse(remoteStatusPayload())
     })()
     return true
@@ -1759,15 +2779,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false
 })
 
-const initPromise = rehydrateState()
+const initPromise = initializeExtensionState()
 
-initPromise.then(() => {
-  ensureRelayConnection().then(() => {
-    reconnectAttempt = 0
-    return recoverRelaySession()
-  }).catch(() => { scheduleReconnect() })
-  // Restore External Control on startup if the user left it enabled.
-  void ensureRemoteHubConnection().catch(() => {})
+initPromise.then((consent) => {
+  if (consent.localEnabled) {
+    ensureRelayConnection().then(() => {
+      reconnectAttempt = 0
+      return recoverRelaySession()
+    }).catch(() => { scheduleReconnect() })
+  }
+  if (consent.remoteEnabled) void ensureRemoteHubConnection().catch(() => {})
 })
 
 async function whenReady(fn) {

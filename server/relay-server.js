@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 import { SNAPSHOT_JS } from "./snapshot.js";
 import { buildWaitExpression, normalizeWaitOptions } from "../extension/wait.js";
+import {
+  BRIDGE_BASE_CAPABILITIES,
+  BRIDGE_PROTOCOL,
+  negotiateBridgeProtocol,
+  sanitizeBridgeCapabilities,
+} from "../extension/protocol.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -56,6 +62,8 @@ let extensionWs = null;
 let extensionConnectedSince = null;
 let extensionRemoteAddress = null;
 let extensionProtocolError = null;
+let extensionDescriptor = null;
+const RELAY_CAPABILITIES = Object.freeze([...BRIDGE_BASE_CAPABILITIES, "downloads"]);
 
 const PUBLIC_TAB_ID_PATTERN = /^t_[A-Za-z0-9_-]{10}$/;
 const connectedTargets = new Map(); // sessionId -> { sessionId, tabId, targetId, targetInfo }
@@ -76,6 +84,27 @@ const reconnectWaiters = new Set();
 
 function extensionConnected() {
   return extensionWs?.readyState === WebSocket.OPEN;
+}
+
+function extensionStatus() {
+  if (!extensionConnected()) return null;
+  return {
+    mode: extensionDescriptor?.mode || "legacy",
+    version: extensionDescriptor?.version || null,
+    protocol: extensionDescriptor?.protocol || null,
+    selectedProtocol: extensionDescriptor?.selectedProtocol || BRIDGE_PROTOCOL.min,
+    compatible: extensionDescriptor?.compatible !== false,
+    capabilities: extensionDescriptor?.capabilities || [],
+  };
+}
+
+function requireExtensionCapability(method) {
+  if (extensionDescriptor?.mode !== "declared") return;
+  const capability = String(method || "").startsWith("BrowserRelay.") ? "downloads" : "cdp";
+  if (extensionDescriptor.capabilities.includes(capability)) return;
+  throw new ApiError(501, "unsupported_capability", `Connected extension does not advertise capability: ${capability}`, {
+    details: { capability, extensionVersion: extensionDescriptor.version || null },
+  });
 }
 
 function flushReconnectWaiters(connected) {
@@ -113,6 +142,8 @@ function sendToExtension(method, params, sessionId) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     return Promise.reject(new ApiError(503, "extension_not_connected", "Extension not connected", { retryable: true }));
   }
+  try { requireExtensionCapability(method); }
+  catch (error) { return Promise.reject(error); }
   const id = nextExtensionId++;
   const payload = { id, method: "forwardCDPCommand", params: { method, params, ...(sessionId ? { sessionId } : {}) } };
   return new Promise((resolve, reject) => {
@@ -378,6 +409,41 @@ function appendDownloadEvent(type, params = {}) {
 function onExtensionMessage(data) {
   let msg;
   try { msg = JSON.parse(typeof data === "string" ? data : data.toString()); } catch { return; }
+
+  if (msg?.method === "BrowserRelay.hello") {
+    const params = msg.params || {};
+    const negotiation = negotiateBridgeProtocol(params.protocol);
+    extensionDescriptor = {
+      mode: "declared",
+      version: typeof params.version === "string" ? params.version.slice(0, 64) : null,
+      protocol: negotiation.peer,
+      selectedProtocol: negotiation.selected,
+      compatible: negotiation.compatible,
+      capabilities: sanitizeBridgeCapabilities(params.capabilities),
+    };
+    LOG.info("extension.hello", {
+      version: extensionDescriptor.version,
+      protocol: extensionDescriptor.protocol,
+      selectedProtocol: extensionDescriptor.selectedProtocol,
+      compatible: extensionDescriptor.compatible,
+      capabilities: extensionDescriptor.capabilities,
+    });
+    if (extensionWs?.readyState === WebSocket.OPEN) {
+      extensionWs.send(JSON.stringify({
+        method: "BrowserRelay.helloAck",
+        params: {
+          version: RELAY_VERSION,
+          protocol: BRIDGE_PROTOCOL,
+          compatible: negotiation.compatible,
+          selectedProtocol: negotiation.selected,
+          capabilities: RELAY_CAPABILITIES,
+          reason: negotiation.reason,
+        },
+      }));
+      if (!negotiation.compatible) extensionWs.close(1002, "incompatible bridge protocol");
+    }
+    return;
+  }
 
   if (msg?.method === "pong") return;
 
@@ -1148,7 +1214,10 @@ const server = createServer(async (req, res) => {
   }
 
   // /extension/status
-  if (path === "/extension/status") { jsonResponse(res, 200, { connected: extensionConnected() }); return; }
+  if (path === "/extension/status") {
+    jsonResponse(res, 200, { connected: extensionConnected(), extension: extensionStatus() });
+    return;
+  }
 
   // /json/version and /json/list
   if (path === "/json/version" || path === "/json/version/") {
@@ -1171,7 +1240,18 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && path === "/api/debug") {
       const tabCount = connectedTargets.size;
       const uptimeSeconds = Math.floor((Date.now() - serverStartTime) / 1000);
-      return jsonResponse(res, 200, { ok: true, version: RELAY_VERSION, host: RELAY_HOST, port: RELAY_PORT, connected: extensionConnected(), tabCount, uptimeSeconds });
+      return jsonResponse(res, 200, {
+        ok: true,
+        version: RELAY_VERSION,
+        host: RELAY_HOST,
+        port: RELAY_PORT,
+        connected: extensionConnected(),
+        tabCount,
+        uptimeSeconds,
+        bridgeProtocol: BRIDGE_PROTOCOL,
+        capabilities: RELAY_CAPABILITIES,
+        extension: extensionStatus(),
+      });
     }
 
     const routeMap = {
@@ -1251,6 +1331,14 @@ wss.on("connection", (ws, req) => {
   const remote = req?.socket?.remoteAddress || "unknown";
   extensionRemoteAddress = remote;
   extensionConnectedSince = new Date().toISOString();
+  extensionDescriptor = {
+    mode: "legacy",
+    version: null,
+    protocol: null,
+    selectedProtocol: BRIDGE_PROTOCOL.min,
+    compatible: true,
+    capabilities: [],
+  };
   LOG.info("extension.connect", { remote, since: extensionConnectedSince });
   extensionWs = ws;
   extensionProtocolError = null;
@@ -1269,6 +1357,7 @@ wss.on("connection", (ws, req) => {
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
     if (extensionWs !== ws) return;
     extensionWs = null;
+    extensionDescriptor = null;
     for (const [id, pending] of pendingCommands) {
       clearTimeout(pending.timer);
       pending.reject(new ApiError(503, "extension_disconnected", "Extension disconnected", { retryable: true }));
