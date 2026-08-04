@@ -26,6 +26,22 @@ Depending on the command an agent sends, Browser Relay can process:
 
 Browser Relay attempts to redact common sensitive network headers, including `Authorization`, `Cookie`, `Proxy-Authorization`, and `Set-Cookie`, before returning captured network metadata. URLs, page content, other headers, console output, and evaluated values may still contain sensitive information.
 
+### Chrome Web Store data-category disclosure
+
+For Chrome Web Store disclosure, Browser Relay conservatively declares all nine Dashboard categories below. Browser Relay can inspect and operate any page in a browser-control session that the user explicitly enables, and explicit page evaluation can return values available to that page's JavaScript. Declaring a category describes this capability; it does not mean that Browser Relay intentionally collects every category in every session. A command normally processes only the data needed for the action the authorized agent requested.
+
+| Dashboard category | How Browser Relay can process it |
+| --- | --- |
+| Personally identifiable information | Page content, forms, console output, network metadata, screenshots, or evaluated values can contain names, email or physical addresses, identifiers, and other information that identifies a person. |
+| Health information | A user-enabled tab can display or accept health, medical, fitness, or treatment information. |
+| Financial and payment information | A user-enabled tab can contain payment-card, bank, transaction, invoice, or other financial information. |
+| Authentication information | Signed-in pages, form interaction, console/network metadata, and explicit evaluation can expose credentials, authentication state, session tokens, or non-HttpOnly cookies. Browser Relay does not request Chrome's `cookies` permission or automatically export a cookie database. The Remote Device ID is also a password-like authentication capability stored only while Remote Relay is enabled. |
+| Personal communications | A user-enabled tab can contain email, chat, direct messages, comments, drafts, or other communications. |
+| Location | Page content or forms can contain a physical location, and explicit page evaluation can return location data available to the page context. Browser Relay does not request a separate Chrome location permission and does not independently track location. |
+| Web history | Tab URLs and titles, navigation state, and requested network URLs/metadata are part of the disclosed tab-control capability. |
+| User activity | Commands and results can include clicks, typed text, selections, scrolling, navigation, tab state, console activity, and optional download interactions. |
+| Website content | Snapshot, screenshot, console, network, and evaluation commands can process page text, HTML/DOM, accessibility data, images visible in screenshots, metadata, and other website content. |
+
 ## Local Relay
 
 When Local Relay is enabled, the extension connects to the Browser Relay daemon at `127.0.0.1` on your computer. Commands and results are processed locally and are not intentionally sent to a Browser Relay-operated server. An AI client connected to that local daemon may receive the data listed above and may act through your existing signed-in browser session.
@@ -62,6 +78,8 @@ The `downloads` permission is optional and is requested only from the settings p
 
 Browser Relay does not sell browser data, share it with data brokers, use it for targeted advertising, or use it to train AI models. Data is disclosed only as needed to provide the control path you explicitly enable: to your local AI client and daemon in Local Relay, or to the remote client and Hub you select in Remote Relay.
 
+Browser Relay does not use or transfer browser data for purposes unrelated to its disclosed browser-control purpose, or to determine creditworthiness or for lending decisions.
+
 Browser Relay's use of information received from Google APIs, including Chrome APIs, adheres to the Chrome Web Store User Data Policy, including its Limited Use requirements.
 
 Browser Relay operators do not intentionally read browser command payloads or results transiting the default Hub. Human access to user data is limited to cases permitted by the Chrome Web Store User Data Policy: when a user explicitly asks for support and consents to sharing specific data, when access is necessary to investigate abuse or a security incident, when required by law, or when data has been aggregated and anonymized for lawful internal operations. Never send Device IDs, passwords, private URLs, screenshots, or page content through a public support issue.
@@ -95,8 +113,9 @@ Browser Relay 是一个开源工具，让 AI Agent 使用你正在使用的 Chro
 - Local Relay 仅在你明确允许后连接本机 `127.0.0.1` 守护进程。本地模式中的浏览器命令与结果不会被有意发送到 Browser Relay 运营的服务器。
 - Remote Relay 需要单独阅读数据披露并确认。开启后，命令和结果会经过你选择的远程 Hub；默认 Hub 是 `https://relay.linso.ai`，也可以使用自托管 Hub。
 - 根据 Agent 执行的命令，数据可能包括标签页 URL/标题、页面文本与 DOM/无障碍数据、截图、点击与输入、控制台信息、网络元数据，以及页面 JavaScript 可访问的值。扩展不申请 Chrome `cookies` 权限，也不会自动导出 Cookie 数据库，但显式页面求值可能读取非 HttpOnly Cookie。
+- Chrome Web Store 数据披露按能力保守勾选九类：个人身份信息、健康信息、金融与支付信息、认证信息、个人通信、位置、浏览历史、用户活动和网站内容。Browser Relay 能处理用户明确授权标签页中的这些数据，并不表示每次会话都会收集全部类别；位置仅指页面显示、表单输入或页面上下文可访问的位置数据，扩展不申请独立的 Chrome 定位权限，也不会自行跟踪位置。
 - Chrome 下载能力使用单独的可选权限；自定义远程 Hub 使用按目标域名单独授予的可选 Host 权限。
-- Browser Relay 不出售浏览器数据，不用于广告，也不用于训练 AI 模型。
+- Browser Relay 不出售浏览器数据，不用于广告、信用评估或借贷决策，也不用于训练 AI 模型；数据仅用于用户明确启用的浏览器控制目的。
 - Device ID 类似密码。持有者在 Remote Relay 关闭或 ID 重新生成前，可以控制已连接的浏览器。
 
 Local Relay 与 Remote Relay 同时开启时会复用同一份 Chrome debugger 会话。关闭其中一个模式只撤销该模式；只有两者都关闭后才会分离受控标签并清理活动会话。关闭 Remote Relay 还会删除本地保存的 Device ID,并要求 Chrome 撤销、随后验证自托管 Hub 的可选 Host 权限；若撤销失败,Options 页面会明确显示待清理状态并允许重试。隐私问题请通过 [GitHub Issues](https://github.com/reliefeai/browser-relay/issues) 联系；公开 issue 中不要附带 Device ID、私密 URL、截图或其他敏感数据。
