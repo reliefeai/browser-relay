@@ -151,6 +151,23 @@ function resolveTab(tabId) {
   return resolveSession(tabId);
 }
 
+// Wait (briefly) for the extension's Target.attachedToTarget event to register
+// a freshly created tab, so callers can see it in /api/tabs and target it with
+// tab-close / eval etc. right after a cold-start navigate. Falls back to the
+// regular tab_not_found error on timeout.
+async function resolveAwaitTab(tabId, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return resolveSession(tabId);
+    } catch (err) {
+      const isMissing = err instanceof ApiError && err.code === "tab_not_found";
+      if (!isMissing || Date.now() >= deadline) throw err;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+}
+
 function boundedNumber(value, fallback, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -762,14 +779,19 @@ async function handleNavigate(req, res) {
   if (!url || typeof url !== "string") return validationError(res, "url is required", "url");
   await ensureExtension();
   let sessionId;
+  let navigatedTabId = "";
   try {
     sessionId = resolveTab(body.tabId);
+    navigatedTabId = connectedTargets.get(sessionId)?.tabId || "";
   } catch (err) {
     // Cold start: nothing is attached to navigate. When the caller didn't target
     // a specific tab, open a fresh blank tab and navigate that instead of failing.
     if (err instanceof ApiError && err.code === "no_attached_tabs" && !body.tabId) {
       const created = await sendToExtension("Target.createTarget", { url: "about:blank" });
-      sessionId = resolveSession(created?.tabId);
+      navigatedTabId = created?.tabId || "";
+      // The extension registers the fresh tab via Target.attachedToTarget; wait
+      // briefly so it is visible in /api/tabs and targetable right after this call.
+      sessionId = await resolveAwaitTab(navigatedTabId);
     } else {
       throw err;
     }
@@ -783,7 +805,23 @@ async function handleNavigate(req, res) {
     const urlResult = await sendToExtension("Runtime.evaluate", { expression: "location.href", returnByValue: true }, sessionId);
     finalUrl = urlResult?.result?.value || url;
   } catch { /* non-critical */ }
-  jsonResponse(res, 200, { ok: true, url: finalUrl, title, ...result });
+
+  // Refresh the cached targetInfo so /api/tabs shows the post-navigation
+  // URL/title instead of the stale attach-time snapshot (SPA pushState and
+  // the event-propagation window both leave the cache stale).
+  try {
+    const targetId = targetForSession(sessionId)?.targetId;
+    if (targetId) {
+      const infoResult = await sendToExtension("Target.getTargetInfo", { targetId }, sessionId);
+      const fresh = infoResult?.targetInfo;
+      if (fresh?.targetId) {
+        const prev = targetForSession(sessionId);
+        if (prev) connectedTargets.set(sessionId, { ...prev, targetInfo: { ...prev.targetInfo, ...fresh } });
+      }
+    }
+  } catch { /* non-critical */ }
+
+  jsonResponse(res, 200, { ok: true, url: finalUrl, title, tabId: navigatedTabId, ...result });
 }
 
 async function handleEval(req, res) {
@@ -1060,6 +1098,28 @@ async function handleScroll(req, res) {
   jsonResponse(res, 200, { ok: true, scrolled: true, direction });
 }
 
+async function handleTabCreate(req, res) {
+  const body = await readBody(req);
+  const url = typeof body?.url === "string" && body.url.trim() ? body.url.trim() : "about:blank";
+  await ensureExtension();
+  const created = await sendToExtension("Target.createTarget", { url });
+  jsonResponse(res, 200, { ok: true, tabId: created?.tabId || null, targetId: created?.targetId || null, url });
+}
+
+async function handleTabClose(req, res) {
+  const body = await readBody(req);
+  const tabId = typeof body?.tabId === "string" ? body.tabId.trim() : "";
+  if (!tabId) {
+    return validationError(res, "tabId is required — closing must target an explicit tab", "tabId");
+  }
+  await ensureExtension();
+  // Closing is destructive, so unlike navigate it never falls back to the
+  // "last attached tab": only the explicitly requested tab may be closed.
+  const sessionId = resolveTab(tabId);
+  await sendToExtension("Target.closeTarget", {}, sessionId);
+  jsonResponse(res, 200, { ok: true, closed: true, tabId });
+}
+
 async function handleDownload(req, res) {
   const body = await readBody(req);
   const selector = body.selector;
@@ -1190,6 +1250,8 @@ const server = createServer(async (req, res) => {
       "GET /api/screenshot": handleScreenshot,
       "POST /api/screenshot": handleScreenshot,
       "POST /api/scroll": handleScroll,
+      "POST /api/tab-create": handleTabCreate,
+      "POST /api/tab-close": handleTabClose,
       "POST /api/download": handleDownload,
       "POST /api/download/start": handleDownloadStart,
       "GET /api/downloads": handleDownloads,

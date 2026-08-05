@@ -994,6 +994,8 @@ Browser commands:
   type        Type text into an input or focused element
   key         Press a key or keyboard shortcut
   scroll      Scroll the page
+  tab-create  Create a new tab in the background with a URL
+  tab-close   Close a tab by ID
   screenshot  Save a PNG screenshot
   eval        Evaluate JavaScript in the page
   download-start Start a Chrome download from a URL
@@ -1535,14 +1537,26 @@ async function browserApiCommand(cmd, args) {
     case "scroll": {
       const direction = flagValue(flags, "direction") || positional[0] || "down";
       const amount = flagValue(flags, "amount");
-      const data = await relayRequest("POST", "/api/scroll", {
-        direction,
-        amount: amount === undefined ? undefined : Number(amount),
-        tabId: tabIdFrom(flags),
-      });
+      const data = await relayRequest("POST", "/api/scroll", { direction, amount: amount === undefined ? undefined : Number(amount), tabId: tabIdFrom(flags) });
       ensureOk(data, json);
       if (json) return printData(data, true);
-      console.log(`Scrolled: ${data.direction || direction}`);
+      console.log(`Scrolled ${data.direction || "?"}`);
+      return;
+    }
+    case "tab-create": {
+      const url = requireValue(flagValue(flags, "url") || positional[0], "url is required");
+      const data = await relayRequest("POST", "/api/tab-create", { url });
+      ensureOk(data, json);
+      if (json) return printData(data, true);
+      console.log(`Created tab ${data.tabId || "?"} → ${data.url || url}`);
+      return;
+    }
+    case "tab-close": {
+      const tabId = requireValue(tabIdFrom(flags) || positional[0], "tabId is required");
+      const data = await relayRequest("POST", "/api/tab-close", { tabId });
+      ensureOk(data, json);
+      if (json) return printData(data, true);
+      console.log(`Closed tab ${data.tabId || tabId}`);
       return;
     }
     case "screenshot": {
@@ -1719,6 +1733,8 @@ switch (cmd) {
   case "type":
   case "key":
   case "scroll":
+  case "tab-create":
+  case "tab-close":
   case "screenshot":
   case "eval":
   case "download":

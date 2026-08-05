@@ -95,6 +95,8 @@ browser-relay click 'button[type=submit]' --tab <tabId>
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --tab <tabId>
 browser-relay key Control+L --tab <tabId>
 browser-relay scroll down --amount 1000 --tab <tabId>
+browser-relay tab-create "https://example.com"      # new background tab, returns tabId
+browser-relay tab-close t_xxxx                      # close a tab YOU created; never a tab the user already had open
 browser-relay download-start https://example.com/file.pdf --filename files/file.pdf
 browser-relay downloads --limit 20
 browser-relay screenshot /tmp/page.png --full-page --tab <tabId>
@@ -141,6 +143,26 @@ List all attached browser tabs.
 GET http://127.0.0.1:18795/api/tabs
 ```
 Returns: `{ ok: true, tabs: [{ id, title, url }] }`
+
+### 1a. browser_tab_create
+Open a new background tab (does not steal focus from the user).
+```
+POST http://127.0.0.1:18795/api/tab-create
+Header: Content-Type: application/json
+Body: { "url": "https://example.com" }
+```
+Returns: `{ ok: true, tabId, targetId, url }`
+
+### 1b. browser_tab_close
+Close a tab by ID. **Destructive** — unlike `navigate`, it never falls back
+to the "last attached tab": an explicit `tabId` is required, so you can never
+accidentally close a tab the user is actively using.
+```
+POST http://127.0.0.1:18795/api/tab-close
+Header: Content-Type: application/json
+Body: { "tabId": "t_xxxx" }
+```
+Returns: `{ ok: true, closed: true, tabId }`
 
 ### 2. browser_navigate
 Navigate a tab to a URL.
@@ -296,6 +318,11 @@ When asked to do something with a web page:
 9. **Re-snapshot** after each action to verify state
 10. **Use `browser-relay download-start` and `browser-relay downloads`** for real file downloads
 11. **Screenshot** if visual confirmation is needed
+
+**Tab hygiene** — reuse the user's existing tabs and never close them. If you
+created a dedicated tab (`browser-relay tab-create`) for a one-off task, close
+it with `browser-relay tab-close` when the task is done. Closing always
+requires an explicit `tabId`, so it can never close a tab you did not intend.
 
 ## Example Session
 
