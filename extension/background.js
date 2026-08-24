@@ -4,6 +4,7 @@
 import { SNAPSHOT_JS } from './snapshot.js'
 import { buildWaitExpression, normalizeWaitOptions } from './wait.js'
 import { createRemoteAuthMessageHandler } from './remote-auth.js'
+import { dialogBlockedMessage, normalizeDialog } from './dialog.js'
 
 const DEFAULT_PORT = 18795
 const DEFAULT_REMOTE_HOST = 'https://relay.linso.ai'
@@ -103,6 +104,8 @@ const PUBLIC_TAB_ID_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv
 const publicTabIds = new Map()
 /** IDs already issued in this browser session are never reused. */
 const issuedPublicTabIds = new Set()
+/** @type {Map<number, {type:string, message:string, url:string, defaultPrompt:string, hasBrowserHandler:boolean, openedAt:number, tabId:string}>} */
+const openDialogs = new Map()
 
 function createPublicTabId() {
   let id
@@ -127,6 +130,59 @@ function publicTabIdFor(chromeTabId) {
 
 /** @type {Map<number, {resolve:(v:any)=>void, reject:(e:Error)=>void}>} */
 const pending = new Map()
+
+function bridgeError(code, message, { status = 409, retryable = false, details } = {}) {
+  const error = new Error(message)
+  error.code = code
+  error.status = status
+  error.retryable = retryable
+  error.details = details
+  return error
+}
+
+function serializeBridgeError(error) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!error || typeof error !== 'object' || !error.code) return message
+  return {
+    code: String(error.code),
+    message,
+    error: message,
+    status: Number(error.status) || 500,
+    retryable: error.retryable === true,
+    ...(error.details === undefined ? {} : { details: error.details }),
+  }
+}
+
+function dialogBlockedError(dialog) {
+  return bridgeError('dialog_blocked', dialogBlockedMessage(dialog), {
+    status: 409,
+    details: { dialog },
+  })
+}
+
+function dialogStatusForTab(tabId) {
+  const dialog = openDialogs.get(tabId) || null
+  return { open: !!dialog, dialog }
+}
+
+async function handleJavaScriptDialog(tabId, { accept, promptText } = {}) {
+  if (typeof accept !== 'boolean') {
+    throw bridgeError('invalid_request', 'accept must be a boolean', { status: 400 })
+  }
+  if (promptText !== undefined && typeof promptText !== 'string') {
+    throw bridgeError('invalid_request', 'promptText must be a string', { status: 400 })
+  }
+  const dialog = openDialogs.get(tabId)
+  if (!dialog) throw bridgeError('dialog_not_found', 'No JavaScript dialog is open for this tab', { status: 404 })
+
+  await chrome.debugger.sendCommand(
+    { tabId },
+    'Page.handleJavaScriptDialog',
+    { accept, ...(promptText === undefined ? {} : { promptText }) },
+  )
+  openDialogs.delete(tabId)
+  return { handled: true, accepted: accept, dialog }
+}
 
 const tabOperationLocks = new Set()
 const reattachPending = new Set()
@@ -475,7 +531,7 @@ async function onRelayMessage(text) {
       const result = await handleForwardCdpCommand(msg)
       sendToRelay({ id: msg.id, result })
     } catch (err) {
-      sendToRelay({ id: msg.id, error: err instanceof Error ? err.message : String(err) })
+      sendToRelay({ id: msg.id, error: serializeBridgeError(err) })
     }
   }
 }
@@ -530,6 +586,7 @@ async function attachTab(tabId, opts = {}) {
 
 async function detachTab(tabId, reason) {
   const tab = tabs.get(tabId)
+  openDialogs.delete(tabId)
 
   for (const [childSessionId, parentTabId] of childSessionToTab.entries()) {
     if (parentTabId === tabId) {
@@ -609,6 +666,7 @@ async function softDetachIdleTabs() {
   let changed = false
   for (const [tabId, tab] of tabs.entries()) {
     if (tab.state !== 'connected' || tab.idle) continue
+    if (openDialogs.has(tabId)) continue
     if (tabOperationLocks.has(tabId) || reattachPending.has(tabId)) continue
     if (!tab.lastActivity || now - tab.lastActivity < idleMs) continue
     tab.idle = true
@@ -715,6 +773,15 @@ async function handleForwardCdpCommand(msg) {
 
   const debuggee = { tabId }
 
+  if (method === 'BrowserRelay.getDialog') return dialogStatusForTab(tabId)
+  if (method === 'BrowserRelay.handleDialog') return await handleJavaScriptDialog(tabId, params)
+  if (method === 'Page.handleJavaScriptDialog') return await handleJavaScriptDialog(tabId, params)
+
+  const openDialog = openDialogs.get(tabId)
+  if (openDialog && method !== 'Target.closeTarget' && method !== 'Target.activateTarget') {
+    throw dialogBlockedError(openDialog)
+  }
+
   if (method === 'Runtime.enable') {
     try { await chrome.debugger.sendCommand(debuggee, 'Runtime.disable'); await new Promise((r) => setTimeout(r, 50)) } catch { /* ignore */ }
     return await chrome.debugger.sendCommand(debuggee, 'Runtime.enable', params)
@@ -758,6 +825,12 @@ function onDebuggerEvent(source, method, params) {
     childSessionToTab.delete(String(params.sessionId))
   }
 
+  if (method === 'Page.javascriptDialogOpening') {
+    openDialogs.set(tabId, normalizeDialog(params, { tabId: publicTabIdFor(tabId) }))
+  } else if (method === 'Page.javascriptDialogClosed') {
+    openDialogs.delete(tabId)
+  }
+
   // Buffer console/network events for remote /api/console and /api/network.
   captureCdpEvent(tabId, method, params)
 
@@ -774,6 +847,7 @@ async function onDebuggerDetach(source, reason) {
   // We detached this tab ourselves for idleness — keep the logical session
   // (same sessionId/targetId) so it transparently re-attaches on demand.
   if (idleDetaching.has(tabId) || tabs.get(tabId)?.idle) return
+  openDialogs.delete(tabId)
 
   if (reason === 'canceled_by_user' || reason === 'replaced_with_devtools') {
     void detachTab(tabId, reason)
@@ -842,6 +916,7 @@ chrome.tabs.onRemoved.addListener((tabId) => void whenReady(() => {
   reattachPending.delete(tabId)
   idleDetaching.delete(tabId)
   clearTabActivity(tabId)
+  openDialogs.delete(tabId)
   const hadPublicTabId = publicTabIds.delete(tabId)
   if (!tabs.has(tabId)) {
     if (hadPublicTabId) void persistState()
@@ -861,9 +936,12 @@ chrome.tabs.onRemoved.addListener((tabId) => void whenReady(() => {
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => void whenReady(() => {
   clearTabActivity(removedTabId)
+  const dialog = openDialogs.get(removedTabId)
+  openDialogs.delete(removedTabId)
   const publicTabId = publicTabIds.get(removedTabId)
   publicTabIds.delete(removedTabId)
   if (publicTabId) publicTabIds.set(addedTabId, publicTabId)
+  if (dialog) openDialogs.set(addedTabId, { ...dialog, tabId: publicTabIdFor(addedTabId) })
   const tab = tabs.get(removedTabId)
   if (!tab) {
     if (publicTabId) void persistState()
@@ -1044,7 +1122,7 @@ async function ensureRemoteHubConnection() {
       version: chrome.runtime.getManifest().version,
       routeId: cfg.remoteRouteId,
       deviceName: 'Browser Relay',
-      capabilities: ['tabs', 'eval', 'wait', 'snapshot', 'click', 'type', 'key', 'scroll', 'navigate', 'screenshot', 'console', 'network'],
+      capabilities: ['tabs', 'eval', 'wait', 'snapshot', 'click', 'type', 'key', 'scroll', 'navigate', 'screenshot', 'console', 'network', 'dialog'],
     }))
 
     ws.onclose = () => { if (ws !== remoteWs) return; onRemoteHubClosed('closed') }
@@ -1112,7 +1190,14 @@ async function handleHubMessage(text) {
     response = { type: 'rpc.response', id: msg.id, status: result.status || 200, headers: { 'content-type': 'application/json' }, body: result.body }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    response = { type: 'rpc.response', id: msg.id, status: 500, headers: { 'content-type': 'application/json' }, body: { ok: false, code: 'remote_exec_failed', error: message, message } }
+    const failure = apiError(
+      err?.code || 'remote_exec_failed',
+      message,
+      Number(err?.status) || 500,
+      err?.retryable === true,
+      err?.details,
+    )
+    response = { type: 'rpc.response', id: msg.id, status: failure.status, headers: { 'content-type': 'application/json' }, body: failure.body }
   }
   try { if (remoteConnected()) remoteWs.send(JSON.stringify(response)) } catch { /* hub gone */ }
 }
@@ -1169,6 +1254,8 @@ async function ensureRemoteAttached(tabId) {
 // Run a CDP command against a chrome tab, attaching on demand.
 async function remoteCdp(tabId, method, params) {
   await ensureRemoteAttached(tabId)
+  const dialog = openDialogs.get(tabId)
+  if (dialog && method !== 'Page.handleJavaScriptDialog') throw dialogBlockedError(dialog)
   return await chrome.debugger.sendCommand({ tabId }, method, params || {})
 }
 
@@ -1186,6 +1273,9 @@ async function executeRemoteApi(method, path, body) {
   if (method === 'POST' && p === '/api/key') return { status: 200, body: await apiKey(payload) }
   if (method === 'POST' && p === '/api/scroll') return { status: 200, body: await apiScroll(payload) }
   if (method === 'GET' && p === '/api/snapshot') return { status: 200, body: await apiSnapshot(payload, u.searchParams) }
+  if (method === 'GET' && (p === '/api/dialog' || p === '/api/dialog/status')) return { status: 200, body: await apiDialogStatus(payload, u.searchParams) }
+  if (method === 'POST' && p === '/api/dialog/accept') return { status: 200, body: await apiDialogAction(payload, true) }
+  if (method === 'POST' && p === '/api/dialog/dismiss') return { status: 200, body: await apiDialogAction(payload, false) }
   if ((method === 'GET' || method === 'POST') && p === '/api/screenshot') return { status: 200, body: await apiScreenshot(payload, u.searchParams) }
   if (method === 'GET' && p === '/api/console') return { status: 200, body: await apiConsole(payload, u.searchParams) }
   if (method === 'POST' && p === '/api/console/clear') return { status: 200, body: await apiConsoleClear(payload) }
@@ -1203,6 +1293,23 @@ async function apiListTabs() {
   }
   await persistState()
   return { ok: true, tabs: list }
+}
+
+async function apiDialogStatus(body, searchParams) {
+  const tabId = await resolveRemoteTabId(body.tabId ?? searchParams.get('tabId'))
+  return { ok: true, ...dialogStatusForTab(tabId) }
+}
+
+async function apiDialogAction(body, accept) {
+  if (body.promptText !== undefined && typeof body.promptText !== 'string') {
+    throw bridgeError('invalid_request', 'promptText must be a string', { status: 400 })
+  }
+  const tabId = await resolveRemoteTabId(body.tabId)
+  const result = await handleJavaScriptDialog(tabId, {
+    accept,
+    ...(body.promptText === undefined ? {} : { promptText: body.promptText }),
+  })
+  return { ok: true, ...result }
 }
 
 async function apiEval(body, searchParams) {

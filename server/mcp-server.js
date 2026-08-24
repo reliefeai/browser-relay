@@ -236,6 +236,45 @@ const TOOLS = [
     },
   },
   {
+    name: "browser_dialog_status",
+    description: "Inspect the native JavaScript dialog currently blocking a tab. Returns its type, message, URL, and default prompt without accepting or dismissing it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
+      },
+    },
+    handler: async (args) => {
+      const params = new URLSearchParams();
+      addQueryParam(params, "tabId", args.tabId);
+      const qs = params.toString();
+      return relayGet(`/api/dialog/status${qs ? "?" + qs : ""}`);
+    },
+  },
+  {
+    name: "browser_dialog_accept",
+    description: "Explicitly accept the native JavaScript dialog blocking a tab. For a prompt dialog, promptText supplies the response. This tool never runs automatically.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
+        promptText: { type: "string", description: "Text to submit to a prompt dialog (optional)" },
+      },
+    },
+    handler: async (args) => relayPost("/api/dialog/accept", args),
+  },
+  {
+    name: "browser_dialog_dismiss",
+    description: "Explicitly cancel or dismiss the native JavaScript dialog blocking a tab. This tool never runs automatically.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string", description: "Tab ID from browser_tabs (optional)" },
+      },
+    },
+    handler: async (args) => relayPost("/api/dialog/dismiss", args),
+  },
+  {
     name: "browser_wait",
     description: "Wait for a CSS selector to be attached to the DOM or become visible. Use this after navigation or an action instead of fixed sleeps.",
     inputSchema: {

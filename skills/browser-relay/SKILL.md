@@ -90,6 +90,9 @@ browser-relay tabs
 browser-relay console --tab <tabId> --limit 50
 browser-relay network --tab <tabId> --type response --status 500 --limit 20
 browser-relay snapshot --tab <tabId> --max-length 20000
+browser-relay dialog status --tab <tabId>
+browser-relay dialog accept 'prompt response' --tab <tabId>
+browser-relay dialog dismiss --tab <tabId>
 browser-relay wait 'button[type=submit]' --state visible --timeout 10000 --tab <tabId>
 browser-relay click 'button[type=submit]' --tab <tabId>
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit --tab <tabId>
@@ -177,6 +180,22 @@ Get a text representation of the current page (interactive elements annotated).
 GET http://127.0.0.1:18795/api/snapshot?tabId=<id>&format=text&maxLength=100000
 ```
 Format can be `"text"` (annotated DOM) or `"html"` (raw HTML).
+
+### 3a. browser_dialog_status / accept / dismiss
+Inspect and explicitly resolve a native `alert`, `confirm`, `prompt`, or
+`beforeunload` dialog. No dialog is ever accepted or dismissed automatically.
+```
+GET http://127.0.0.1:18795/api/dialog/status?tabId=<id>
+POST http://127.0.0.1:18795/api/dialog/accept
+Body: { "tabId?": "...", "promptText?": "text for a prompt" }
+POST http://127.0.0.1:18795/api/dialog/dismiss
+Body: { "tabId?": "..." }
+```
+Status returns `{ ok: true, open, dialog }`; an open dialog contains `type`,
+`message`, `url`, `defaultPrompt`, `hasBrowserHandler`, `openedAt`, and `tabId`.
+While it is open, page operations fail immediately with `code: "dialog_blocked"`
+and the same dialog metadata in `details.dialog` instead of waiting for a CDP
+timeout. Inspect first, then make an explicit accept/dismiss decision.
 
 ### 3b. browser_wait
 Wait for a CSS selector to be attached to the DOM or become visible. Prefer
@@ -288,6 +307,8 @@ When asked to do something with a web page:
 1. **`browser-relay tabs` first** — discover available tabs and their URLs
 2. **`browser-relay navigate`** if needed — go to the target page
 3. **`browser-relay snapshot`** — understand the page structure
+   - If it returns `dialog_blocked`, run `browser-relay dialog status`, then
+     explicitly accept or dismiss the dialog before retrying.
 4. **Plan actions** based on snapshot (click what, type where)
 5. **Execute** (`browser-relay click`, `browser-relay type`, `browser-relay key`, `browser-relay scroll`) one at a time
 6. **`browser-relay wait`** for the next expected element after navigation or an action; do not guess with fixed sleeps
@@ -347,6 +368,7 @@ Add to your MCP config (`~/.claude/mcp.json` or equivalent):
 | No attached tabs | Extension connected but no tab is attached | The extension auto-attaches all regular tabs. Make sure at least one non-chrome:// tab is open |
 | Element not found: selector | The CSS selector did not match anything on the page | Try a different selector, or take a snapshot first to inspect the DOM |
 | wait_timeout | The selector did not reach the requested attached/visible state before timeout | Re-snapshot the page, check the selector, or retry when the page is expected to load more slowly |
+| dialog_blocked | A native JavaScript dialog is blocking page execution | Run `dialog status`, inspect its fields, then explicitly `dialog accept` or `dialog dismiss` |
 | Session with given id not found (-32001) | The relay holds stale session state (e.g. after an extension reload) | Run `browser-relay fix` — restarts the relay and clears stale sessions; the extension reconnects automatically |
 
 ## Health Check

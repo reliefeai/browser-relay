@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 import { SNAPSHOT_JS } from "./snapshot.js";
 import { buildWaitExpression, normalizeWaitOptions } from "../extension/wait.js";
+import { dialogBlockedMessage, normalizeDialog } from "../extension/dialog.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -61,6 +62,7 @@ const PUBLIC_TAB_ID_PATTERN = /^t_[A-Za-z0-9_-]{10}$/;
 const connectedTargets = new Map(); // sessionId -> { sessionId, tabId, targetId, targetInfo }
 let nextExtensionId = 1;
 const pendingCommands = new Map();
+const openDialogs = new Map(); // main sessionId -> current Page.javascriptDialogOpening payload
 let nextConsoleEntryId = 1;
 let consoleEntries = [];
 const consoleEnabledSessions = new Set();
@@ -91,7 +93,7 @@ function scheduleGraceCleanup() {
   clearGraceTimer();
   graceTimer = setTimeout(() => {
     graceTimer = null;
-    if (!extensionConnected()) { connectedTargets.clear(); flushReconnectWaiters(false); }
+    if (!extensionConnected()) { connectedTargets.clear(); openDialogs.clear(); flushReconnectWaiters(false); }
   }, EXTENSION_GRACE_MS);
 }
 
@@ -108,11 +110,47 @@ function waitForExtension(timeoutMs = 3_000) {
 // ---------------------------------------------------------------------------
 // Send CDP command to extension
 // ---------------------------------------------------------------------------
+const DIALOG_SAFE_METHODS = new Set([
+  "BrowserRelay.getDialog",
+  "BrowserRelay.handleDialog",
+  "Page.handleJavaScriptDialog",
+  "Target.activateTarget",
+  "Target.closeTarget",
+]);
+
+function dialogBlockedError(dialog) {
+  return new ApiError(409, "dialog_blocked", dialogBlockedMessage(dialog), {
+    details: { dialog },
+  });
+}
+
+function extensionCommandError(error) {
+  if (error && typeof error === "object" && error.code) {
+    return new ApiError(
+      Number(error.status) || 500,
+      String(error.code),
+      String(error.message || error.error || "Extension command failed"),
+      { retryable: error.retryable === true, details: error.details },
+    );
+  }
+  return new Error(String(error));
+}
+
+function rejectPendingForDialog(sessionId, dialog) {
+  for (const [id, pending] of pendingCommands) {
+    if (pending.sessionId !== sessionId || DIALOG_SAFE_METHODS.has(pending.method)) continue;
+    pendingCommands.delete(id);
+    pending.reject(dialogBlockedError(dialog));
+  }
+}
+
 function sendToExtension(method, params, sessionId) {
   const ws = extensionWs;
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     return Promise.reject(new ApiError(503, "extension_not_connected", "Extension not connected", { retryable: true }));
   }
+  const dialog = sessionId ? openDialogs.get(sessionId) : null;
+  if (dialog && !DIALOG_SAFE_METHODS.has(method)) return Promise.reject(dialogBlockedError(dialog));
   const id = nextExtensionId++;
   const payload = { id, method: "forwardCDPCommand", params: { method, params, ...(sessionId ? { sessionId } : {}) } };
   return new Promise((resolve, reject) => {
@@ -124,6 +162,8 @@ function sendToExtension(method, params, sessionId) {
       resolve: (v) => { clearTimeout(timer); resolve(v); },
       reject: (e) => { clearTimeout(timer); reject(e); },
       timer,
+      method,
+      sessionId,
     });
     try { ws.send(JSON.stringify(payload)); }
     catch (err) { clearTimeout(timer); pendingCommands.delete(id); reject(err instanceof Error ? err : new Error(String(err))); }
@@ -385,7 +425,7 @@ function onExtensionMessage(data) {
     const pending = pendingCommands.get(msg.id);
     if (!pending) return;
     pendingCommands.delete(msg.id);
-    if (msg.error) pending.reject(new Error(String(msg.error)));
+    if (msg.error) pending.reject(extensionCommandError(msg.error));
     else pending.resolve(msg.result);
     return;
   }
@@ -395,6 +435,24 @@ function onExtensionMessage(data) {
     const cdpParams = msg.params?.params;
     const eventSessionId = msg.params?.sessionId;
     const eventTabId = msg.params?.tabId;
+
+    let dialogSessionId = eventSessionId && connectedTargets.has(eventSessionId) ? eventSessionId : null;
+    if (!dialogSessionId && PUBLIC_TAB_ID_PATTERN.test(eventTabId)) {
+      for (const target of connectedTargets.values()) {
+        if (target.tabId === eventTabId) { dialogSessionId = target.sessionId; break; }
+      }
+    }
+    if (dialogSessionId && cdpMethod === "Page.javascriptDialogOpening") {
+      const target = connectedTargets.get(dialogSessionId);
+      const dialog = normalizeDialog(cdpParams, {
+        tabId: target?.tabId || eventTabId,
+        url: target?.targetInfo?.url || "",
+      });
+      openDialogs.set(dialogSessionId, dialog);
+      rejectPendingForDialog(dialogSessionId, dialog);
+    } else if (dialogSessionId && cdpMethod === "Page.javascriptDialogClosed") {
+      openDialogs.delete(dialogSessionId);
+    }
 
     if (eventSessionId && (
       cdpMethod === "Runtime.consoleAPICalled" ||
@@ -443,14 +501,14 @@ function onExtensionMessage(data) {
       }
     } else if (cdpMethod === "Target.detachedFromTarget") {
       const { sessionId, targetId } = cdpParams || {};
-      if (sessionId) { connectedTargets.delete(sessionId); consoleEnabledSessions.delete(sessionId); networkEnabledSessions.delete(sessionId); }
-      else if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) { connectedTargets.delete(sid); consoleEnabledSessions.delete(sid); networkEnabledSessions.delete(sid); } } }
+      if (sessionId) { connectedTargets.delete(sessionId); openDialogs.delete(sessionId); consoleEnabledSessions.delete(sessionId); networkEnabledSessions.delete(sessionId); }
+      else if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) { connectedTargets.delete(sid); openDialogs.delete(sid); consoleEnabledSessions.delete(sid); networkEnabledSessions.delete(sid); } } }
     } else if (cdpMethod === "Target.targetInfoChanged") {
       const info = cdpParams?.targetInfo;
       if (info?.targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === info.targetId) { connectedTargets.set(sid, { ...t, targetInfo: { ...t.targetInfo, ...info } }); } } }
     } else if (cdpMethod === "Target.targetDestroyed" || cdpMethod === "Target.targetCrashed") {
       const targetId = cdpParams?.targetId;
-      if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) { connectedTargets.delete(sid); consoleEnabledSessions.delete(sid); networkEnabledSessions.delete(sid); } } }
+      if (targetId) { for (const [sid, t] of connectedTargets) { if (t.targetId === targetId) { connectedTargets.delete(sid); openDialogs.delete(sid); consoleEnabledSessions.delete(sid); networkEnabledSessions.delete(sid); } } }
     }
   }
 }
@@ -654,6 +712,52 @@ async function handleTabs(_req, res) {
     tabs.push({ id: t.tabId, title: t.targetInfo?.title || "", url: t.targetInfo?.url || "" });
   }
   jsonResponse(res, 200, { ok: true, tabs });
+}
+
+async function currentDialogState(sessionId) {
+  const result = await sendToExtension("BrowserRelay.getDialog", {}, sessionId);
+  if (!result?.open || !result.dialog) {
+    openDialogs.delete(sessionId);
+    return { open: false, dialog: null };
+  }
+  const target = connectedTargets.get(sessionId);
+  const dialog = normalizeDialog(result.dialog, {
+    tabId: target?.tabId || result.dialog.tabId,
+    url: target?.targetInfo?.url || "",
+    openedAt: Number(result.dialog.openedAt),
+  });
+  openDialogs.set(sessionId, dialog);
+  return { open: true, dialog };
+}
+
+async function handleDialogStatus(req, res) {
+  await ensureExtension();
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const sessionId = resolveTab(url.searchParams.get("tabId") || undefined);
+  jsonResponse(res, 200, { ok: true, ...(await currentDialogState(sessionId)) });
+}
+
+async function handleDialogAction(req, res, accept) {
+  const body = await readBody(req);
+  if (body.promptText !== undefined && typeof body.promptText !== "string") {
+    return validationError(res, "promptText must be a string", "promptText");
+  }
+  await ensureExtension();
+  const sessionId = resolveTab(body.tabId);
+  const result = await sendToExtension("BrowserRelay.handleDialog", {
+    accept,
+    ...(body.promptText === undefined ? {} : { promptText: body.promptText }),
+  }, sessionId);
+  openDialogs.delete(sessionId);
+  jsonResponse(res, 200, { ok: true, ...result });
+}
+
+async function handleDialogAccept(req, res) {
+  return handleDialogAction(req, res, true);
+}
+
+async function handleDialogDismiss(req, res) {
+  return handleDialogAction(req, res, false);
 }
 
 async function handleConsole(req, res) {
@@ -1184,6 +1288,10 @@ const server = createServer(async (req, res) => {
       "POST /api/eval": handleEval,
       "POST /api/wait": handleWait,
       "GET /api/snapshot": handleSnapshot,
+      "GET /api/dialog": handleDialogStatus,
+      "GET /api/dialog/status": handleDialogStatus,
+      "POST /api/dialog/accept": handleDialogAccept,
+      "POST /api/dialog/dismiss": handleDialogDismiss,
       "POST /api/click": handleClick,
       "POST /api/type": handleType,
       "POST /api/key": handleKey,
@@ -1255,6 +1363,7 @@ wss.on("connection", (ws, req) => {
   extensionWs = ws;
   extensionProtocolError = null;
   connectedTargets.clear();
+  openDialogs.clear();
   clearGraceTimer();
   flushReconnectWaiters(true);
 

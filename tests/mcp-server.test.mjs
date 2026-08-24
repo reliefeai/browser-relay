@@ -134,3 +134,49 @@ test('browser_wait MCP tool forwards the stable wait contract', async (t) => {
     body: { selector: '#ready', state: 'visible', timeoutMs: 5000, pollMs: 100, tabId: 'tab-1' },
   });
 });
+
+test('browser_dialog_accept MCP tool forwards an explicit prompt response', async (t) => {
+  let received = null;
+  const relay = await startFakeRelay(t, async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk.toString();
+    received = { method: req.method, url: req.url, body: JSON.parse(raw) };
+    const body = JSON.stringify({
+      ok: true,
+      handled: true,
+      accepted: true,
+      dialog: { type: 'prompt', message: 'Name?', defaultPrompt: 'Anonymous' },
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+    res.end(body);
+  });
+
+  const child = spawn(process.execPath, ['server/mcp-server.js'], {
+    cwd: new URL('..', import.meta.url),
+    env: { ...process.env, BROWSER_RELAY_URL: `http://127.0.0.1:${relay.port}` },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  t.after(() => {
+    if (!child.killed) child.kill('SIGTERM');
+  });
+
+  writeMcpMessage(child.stdin, {
+    jsonrpc: '2.0',
+    id: 3,
+    method: 'tools/call',
+    params: {
+      name: 'browser_dialog_accept',
+      arguments: { tabId: 't_AAAAAAAAAA', promptText: 'Ada' },
+    },
+  });
+
+  const msg = await readMcpMessage(child.stdout);
+  assert.equal(msg.id, 3);
+  assert.equal(msg.result.isError, undefined);
+  assert.equal(JSON.parse(msg.result.content[0].text).accepted, true);
+  assert.deepEqual(received, {
+    method: 'POST',
+    url: '/api/dialog/accept',
+    body: { tabId: 't_AAAAAAAAAA', promptText: 'Ada' },
+  });
+});

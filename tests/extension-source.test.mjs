@@ -90,3 +90,24 @@ test('remote extension executor exposes the same wait contract as the local rela
   assert.match(background, /'tab_not_found'/);
   assert.match(background, /'wait_evaluation_failed'/);
 });
+
+test('extension tracks native dialogs without any automatic accept policy', () => {
+  const background = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf-8');
+
+  assert.match(background, /import \{ dialogBlockedMessage, normalizeDialog \} from '\.\/dialog\.js'/);
+  assert.match(background, /const openDialogs = new Map\(\)/);
+  assert.match(background, /method === 'Page\.javascriptDialogOpening'[\s\S]*openDialogs\.set\(tabId, normalizeDialog/);
+  assert.match(background, /method === 'Page\.javascriptDialogClosed'[\s\S]*openDialogs\.delete\(tabId\)/);
+  assert.match(background, /'Page\.handleJavaScriptDialog'[\s\S]*\{ accept,[\s\S]*promptText/);
+  assert.match(background, /method === 'BrowserRelay\.getDialog'/);
+  assert.match(background, /method === 'BrowserRelay\.handleDialog'/);
+  assert.match(background, /capabilities: \[[^\]]*'dialog'/);
+  assert.match(background, /p === '\/api\/dialog\/accept'/);
+  assert.match(background, /p === '\/api\/dialog\/dismiss'/);
+
+  const eventHandler = background.slice(
+    background.indexOf('function onDebuggerEvent'),
+    background.indexOf('async function onDebuggerDetach'),
+  );
+  assert.doesNotMatch(eventHandler, /sendCommand\([^\n]*Page\.handleJavaScriptDialog/);
+});

@@ -173,6 +173,97 @@ test('old extension gets an explicit short-id upgrade error', async (t) => {
   assert.match(result.body.message, /Reload the extension/);
 });
 
+test('dialog APIs expose prompt metadata and require an explicit accept or dismiss', async (t) => {
+  const relay = await startRelay(t);
+  let dialog = null;
+  const extension = await connectFakeExtension(t, relay.port, (cmd) => {
+    if (cmd.method === 'BrowserRelay.getDialog') return { open: !!dialog, dialog };
+    if (cmd.method === 'BrowserRelay.handleDialog') {
+      const handled = dialog;
+      dialog = null;
+      return { handled: true, accepted: cmd.params.accept, dialog: handled };
+    }
+    return {};
+  });
+
+  extension.announceTab({ sessionId: 'session-dialog', tabId: 't_AAAAAAAAAA', targetId: 'target-dialog' });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
+
+  dialog = {
+    type: 'prompt',
+    message: 'What is your name?',
+    url: 'https://example.test/prompt',
+    defaultPrompt: 'Anonymous',
+    hasBrowserHandler: false,
+    openedAt: 123,
+    tabId: 't_AAAAAAAAAA',
+  };
+  extension.sendEvent('session-dialog', 'Page.javascriptDialogOpening', dialog, 't_AAAAAAAAAA');
+
+  const status = await waitFor(async () => {
+    const result = await fetchJson(relay.port, '/api/dialog/status?tabId=t_AAAAAAAAAA');
+    return result.body.open ? result : null;
+  });
+  assert.equal(status.status, 200);
+  assert.deepEqual(status.body.dialog, dialog);
+
+  const snapshot = await fetchJson(relay.port, '/api/snapshot?tabId=t_AAAAAAAAAA');
+  assert.equal(snapshot.status, 409);
+  assert.equal(snapshot.body.code, 'dialog_blocked');
+  assert.deepEqual(snapshot.body.details.dialog, dialog);
+  assert.equal(extension.commands.some((cmd) => cmd.method === 'Runtime.evaluate'), false);
+
+  const accepted = await fetchJson(relay.port, '/api/dialog/accept', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tabId: 't_AAAAAAAAAA', promptText: 'Ada' }),
+  });
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.body.accepted, true);
+  const acceptCommand = extension.commands.findLast((cmd) => cmd.method === 'BrowserRelay.handleDialog');
+  assert.deepEqual(acceptCommand.params, { accept: true, promptText: 'Ada' });
+
+  dialog = { ...dialog, type: 'confirm', message: 'Continue?', defaultPrompt: '', openedAt: 456 };
+  extension.sendEvent('session-dialog', 'Page.javascriptDialogOpening', dialog, 't_AAAAAAAAAA');
+  await waitFor(async () => (await fetchJson(relay.port, '/api/dialog?tabId=t_AAAAAAAAAA')).body.open);
+  const dismissed = await fetchJson(relay.port, '/api/dialog/dismiss', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tabId: 't_AAAAAAAAAA' }),
+  });
+  assert.equal(dismissed.status, 200);
+  assert.equal(dismissed.body.accepted, false);
+  const dismissCommand = extension.commands.findLast((cmd) => cmd.method === 'BrowserRelay.handleDialog');
+  assert.deepEqual(dismissCommand.params, { accept: false });
+});
+
+test('a dialog opening rejects an in-flight blocked command instead of waiting for the CDP timeout', async (t) => {
+  const relay = await startRelay(t);
+  const extension = await connectFakeExtension(t, relay.port, (cmd) => {
+    if (cmd.method === 'Runtime.evaluate') return new Promise(() => {});
+    return {};
+  });
+  extension.announceTab({ sessionId: 'session-blocked', tabId: 't_BBBBBBBBBB', targetId: 'target-blocked' });
+  await waitFor(async () => (await fetchJson(relay.port, '/api/tabs')).body.tabs?.length === 1);
+
+  const pendingSnapshot = fetchJson(relay.port, '/api/snapshot?tabId=t_BBBBBBBBBB');
+  await waitFor(() => extension.commands.some((cmd) => cmd.method === 'Runtime.evaluate'));
+  extension.sendEvent('session-blocked', 'Page.javascriptDialogOpening', {
+    type: 'alert',
+    message: 'Blocked now',
+    url: 'https://example.test/',
+  }, 't_BBBBBBBBBB');
+
+  const result = await Promise.race([
+    pendingSnapshot,
+    delay(1000).then(() => { throw new Error('dialog_blocked response timed out'); }),
+  ]);
+  assert.equal(result.status, 409);
+  assert.equal(result.body.code, 'dialog_blocked');
+  assert.equal(result.body.retryable, false);
+  assert.equal(result.body.details.dialog.message, 'Blocked now');
+});
+
 test('closed or duplicate formal ids never fall through to another tab', async (t) => {
   const relay = await startRelay(t);
   const extension = await connectFakeExtension(t, relay.port, (cmd) => {
