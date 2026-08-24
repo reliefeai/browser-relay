@@ -987,6 +987,7 @@ Commands:
 Browser commands:
   tabs        List attached Chrome tabs
   snapshot    Print annotated page text
+  dialog      Inspect, accept, or dismiss a native JavaScript dialog
   wait        Wait for a CSS selector to attach or become visible
   console     Print captured console, page error, and browser log entries
   network     Print captured Network.* request/response/failure entries
@@ -1385,6 +1386,19 @@ function printDownloads(data, json) {
   }
 }
 
+function printDialog(data, json) {
+  if (json) return printData(data, true);
+  if (!data?.open || !data.dialog) {
+    console.log("No JavaScript dialog is open.");
+    return;
+  }
+  const dialog = data.dialog;
+  console.log(`Type: ${dialog.type || "unknown"}`);
+  console.log(`Message: ${dialog.message || ""}`);
+  console.log(`URL: ${dialog.url || ""}`);
+  console.log(`Default prompt: ${dialog.defaultPrompt || ""}`);
+}
+
 function ensureOk(data, json = false) {
   if (data?.ok !== false) return;
   if (json) {
@@ -1472,6 +1486,36 @@ async function browserApiCommand(cmd, args) {
       if (json) return printData(data, true);
       console.log(data.html ?? data.snapshot ?? "");
       return;
+    }
+    case "dialog": {
+      const action = String(positional[0] || "status").toLowerCase();
+      if (action === "status") {
+        const params = new URLSearchParams();
+        addParam(params, "tabId", tabIdFrom(flags));
+        const qs = params.toString();
+        return printDialog(await relayRequest("GET", `/api/dialog/status${qs ? `?${qs}` : ""}`), json);
+      }
+      if (action === "accept") {
+        let promptText = flagValue(flags, "text", "prompt-text", "promptText");
+        if (flagBool(flags, "stdin")) promptText = readFileSync(0, "utf-8");
+        else if (promptText === undefined && positional.length > 1) promptText = positional.slice(1).join(" ");
+        const data = await relayRequest("POST", "/api/dialog/accept", {
+          tabId: tabIdFrom(flags),
+          ...(promptText === undefined ? {} : { promptText: String(promptText) }),
+        });
+        ensureOk(data, json);
+        if (json) return printData(data, true);
+        console.log(`Accepted ${data.dialog?.type || "JavaScript"} dialog.`);
+        return;
+      }
+      if (action === "dismiss") {
+        const data = await relayRequest("POST", "/api/dialog/dismiss", { tabId: tabIdFrom(flags) });
+        ensureOk(data, json);
+        if (json) return printData(data, true);
+        console.log(`Dismissed ${data.dialog?.type || "JavaScript"} dialog.`);
+        return;
+      }
+      throw new Error("Usage: browser-relay dialog [status|accept [text]|dismiss] [--tab id] [--json]");
     }
     case "wait": {
       const selector = requireValue(flagValue(flags, "selector") || positional.join(" "), "selector is required");
@@ -1638,6 +1682,9 @@ function apiHelp() {
   network [--tab id]           Print captured network events
   navigate <url> [--tab id]    Navigate an attached tab
   snapshot [--tab id]          Print annotated page text
+  dialog status [--tab id]     Inspect the current native JavaScript dialog
+  dialog accept [text]         Explicitly accept it (text is for prompt)
+  dialog dismiss               Explicitly cancel/dismiss it
   wait <selector>              Wait for a selector (visible by default)
   click <selector>             Click a CSS selector
   type <text>                  Type text into the focused element
@@ -1670,6 +1717,9 @@ Examples:
   browser-relay console --limit 50
   browser-relay network --type response --status 500 --limit 20
   browser-relay snapshot --tab t_A7k2Pm9QxL --max-length 20000
+  browser-relay dialog status --tab t_A7k2Pm9QxL
+  browser-relay dialog accept 'prompt response' --tab t_A7k2Pm9QxL
+  browser-relay dialog dismiss --tab t_A7k2Pm9QxL
   browser-relay wait 'button[type=submit]' --state visible --timeout 10000
   browser-relay click 'button[type=submit]'
   browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
@@ -1714,6 +1764,7 @@ switch (cmd) {
   case "go":
   case "open":
   case "snapshot":
+  case "dialog":
   case "wait":
   case "click":
   case "type":

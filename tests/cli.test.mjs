@@ -472,6 +472,35 @@ test('wait CLI sends stable options and prints a compact success', async (t) => 
   });
 });
 
+test('dialog accept CLI forwards prompt text only after an explicit command', async (t) => {
+  let received = null;
+  const relay = await startFakeRelay(t, async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk.toString();
+    received = { method: req.method, url: req.url, body: JSON.parse(raw) };
+    const body = JSON.stringify({
+      ok: true,
+      handled: true,
+      accepted: true,
+      dialog: { type: 'prompt', message: 'Name?' },
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+    res.end(body);
+  });
+
+  const result = await runCli(t, relay.port, [
+    'dialog', 'accept', 'Ada Lovelace', '--tab', 't_AAAAAAAAAA',
+  ]);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'Accepted prompt dialog.');
+  assert.deepEqual(received, {
+    method: 'POST',
+    url: '/api/dialog/accept',
+    body: { tabId: 't_AAAAAAAAAA', promptText: 'Ada Lovelace' },
+  });
+});
+
 test('doctor reports a ready end-to-end browser path as structured JSON', async (t) => {
   const relay = await startFakeRelay(t, (req, res) => {
     assert.equal(req.url, '/api/debug');

@@ -163,6 +163,7 @@ Browser Relay is designed to be comfortable for agents, not just low-level autom
 - Actions target existing attached tabs, keeping the user's browser context visible and predictable.
 - Stable CSS waits let agents wait for an element to attach or become visible instead of guessing with fixed sleeps.
 - Console and network capture record `console.*`, page exceptions, log entries, and request/response activity for debugging real-page behavior.
+- Native `alert`, `confirm`, `prompt`, and `beforeunload` dialogs are inspectable and require an explicit accept/dismiss decision; blocked page commands return `dialog_blocked` immediately.
 
 ## CLI
 
@@ -173,6 +174,9 @@ browser-relay tabs
 browser-relay console --tab t_A7k2Pm9QxL --limit 50
 browser-relay network --tab t_A7k2Pm9QxL --type response --status 500
 browser-relay snapshot --tab t_A7k2Pm9QxL --max-length 20000
+browser-relay dialog status --tab t_A7k2Pm9QxL
+browser-relay dialog accept 'prompt response' --tab t_A7k2Pm9QxL
+browser-relay dialog dismiss --tab t_A7k2Pm9QxL
 browser-relay wait 'button[type=submit]' --state visible --timeout 10000 --tab t_A7k2Pm9QxL
 browser-relay click 'button[type=submit]' --tab t_A7k2Pm9QxL
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
@@ -242,6 +246,7 @@ browser-relay tabs       # List attached browser tabs
 browser-relay console    # Print captured console/page errors
 browser-relay network    # Print captured network requests/responses/failures
 browser-relay snapshot   # Print annotated page text
+browser-relay dialog     # Inspect, accept, or dismiss a native JavaScript dialog
 browser-relay wait       # Wait for a CSS selector to attach or become visible
 browser-relay click      # Click an element by CSS selector
 browser-relay type       # Type text into the page
@@ -273,7 +278,7 @@ After installing the npm package, use `browser-relay-mcp` directly:
 }
 ```
 
-The MCP server exposes high-level tools such as `browser_tabs`, `browser_snapshot`, `browser_wait`, `browser_click`, `browser_type`, `browser_key`, and `browser_screenshot`.
+The MCP server exposes high-level tools such as `browser_tabs`, `browser_snapshot`, `browser_dialog_status`, `browser_dialog_accept`, `browser_dialog_dismiss`, `browser_wait`, `browser_click`, `browser_type`, `browser_key`, and `browser_screenshot`.
 
 ## HTTP API
 
@@ -291,6 +296,14 @@ curl http://127.0.0.1:18795/api/tabs
 
 # Take a text snapshot of a page
 curl "http://127.0.0.1:18795/api/snapshot?tabId=t_A7k2Pm9QxL"
+
+# Inspect a blocking native JavaScript dialog without resolving it
+curl "http://127.0.0.1:18795/api/dialog/status?tabId=t_A7k2Pm9QxL"
+
+# Explicitly accept a prompt with text (use /dismiss to cancel instead)
+curl -X POST http://127.0.0.1:18795/api/dialog/accept \
+  -H "Content-Type: application/json" \
+  -d '{"tabId":"t_A7k2Pm9QxL","promptText":"Ada"}'
 
 # Wait until an element is visible (attached is also supported)
 curl -X POST http://127.0.0.1:18795/api/wait \
@@ -320,6 +333,9 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/network/clear` | POST | Clear captured network entries |
 | `/api/navigate` | POST | Navigate an attached tab |
 | `/api/snapshot` | GET | Get annotated text or raw HTML |
+| `/api/dialog`, `/api/dialog/status` | GET | Inspect the current native JavaScript dialog |
+| `/api/dialog/accept` | POST | Explicitly accept it, optionally with prompt text |
+| `/api/dialog/dismiss` | POST | Explicitly cancel/dismiss it |
 | `/api/wait` | POST | Wait for a CSS selector to attach or become visible |
 | `/api/click` | POST | Click an element by CSS selector |
 | `/api/type` | POST | Type into an input |
@@ -413,6 +429,7 @@ Load the local `extension/` directory from `chrome://extensions` in Developer mo
 - The relay binds to `127.0.0.1` by default. Do not expose it to the public internet.
 - Remote Relay never opens a port: the browser connects out to the public relay, which only holds a hash of your Device ID secret in memory. Treat the Device ID like a password; anyone with it can control the browser while Remote Relay is on.
 - Browser Relay gives agents access to the same browser state you have, so treat enabled agents as trusted local software.
+- Native JavaScript dialogs are never accepted or dismissed automatically. `confirm`, `prompt`, and `beforeunload` always require an explicit dialog accept/dismiss command.
 
 ## License
 

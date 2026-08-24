@@ -160,6 +160,7 @@ Browser Relay 专门为 Agent 工作流做了设计,不只是给底层脚本用:
 - 操作落在已附加的真实标签页上,让浏览器上下文保持可见、可预期。
 - 稳定 CSS 等待让 Agent 等元素进入 DOM 或变为可见，不再依赖猜测性的固定 sleep。
 - Console 和 Network 捕获会记录 `console.*`、页面异常、日志以及请求/响应,便于诊断真实页面行为。
+- 原生 `alert`、`confirm`、`prompt`、`beforeunload` 对话框可读取状态并明确接受/取消；阻塞期间页面命令立即返回 `dialog_blocked`，不再静默超时。
 
 ## CLI
 
@@ -170,6 +171,9 @@ browser-relay tabs
 browser-relay console --tab t_A7k2Pm9QxL --limit 50
 browser-relay network --tab t_A7k2Pm9QxL --type response --status 500
 browser-relay snapshot --tab t_A7k2Pm9QxL --max-length 20000
+browser-relay dialog status --tab t_A7k2Pm9QxL
+browser-relay dialog accept 'prompt 输入文本' --tab t_A7k2Pm9QxL
+browser-relay dialog dismiss --tab t_A7k2Pm9QxL
 browser-relay wait 'button[type=submit]' --state visible --timeout 10000 --tab t_A7k2Pm9QxL
 browser-relay click 'button[type=submit]' --tab t_A7k2Pm9QxL
 browser-relay type 'hello world' --selector 'input[name=q]' --clear --submit
@@ -237,6 +241,7 @@ browser-relay tabs       # 列出已附加标签页
 browser-relay console    # 输出 console 和页面错误记录
 browser-relay network    # 输出网络请求、响应和失败事件
 browser-relay snapshot   # 输出页面结构化文本
+browser-relay dialog     # 检查、接受或取消原生 JavaScript 对话框
 browser-relay wait       # 等待 CSS 元素进入 DOM 或变为可见
 browser-relay click      # 按 CSS selector 点击元素
 browser-relay type       # 输入文本
@@ -268,7 +273,7 @@ browser-relay api-help   # 查看浏览器操作命令示例
 }
 ```
 
-MCP server 提供 `browser_tabs`、`browser_snapshot`、`browser_wait`、`browser_click`、`browser_type`、`browser_key`、`browser_screenshot` 等高层工具。
+MCP server 提供 `browser_tabs`、`browser_snapshot`、`browser_dialog_status`、`browser_dialog_accept`、`browser_dialog_dismiss`、`browser_wait`、`browser_click`、`browser_type`、`browser_key`、`browser_screenshot` 等高层工具。
 
 ## HTTP API
 
@@ -283,6 +288,14 @@ HTTP、CLI `--json` 和 MCP 工具错误都使用结构化错误格式:
 ```bash
 curl http://127.0.0.1:18795/api/tabs
 curl "http://127.0.0.1:18795/api/snapshot?tabId=t_A7k2Pm9QxL"
+
+# 只读取当前原生 JavaScript 对话框，不做任何自动处理
+curl "http://127.0.0.1:18795/api/dialog/status?tabId=t_A7k2Pm9QxL"
+
+# 明确接受 prompt 并提交文本（取消则调用 /dismiss）
+curl -X POST http://127.0.0.1:18795/api/dialog/accept \
+  -H "Content-Type: application/json" \
+  -d '{"tabId":"t_A7k2Pm9QxL","promptText":"Ada"}'
 
 curl -X POST http://127.0.0.1:18795/api/wait \
   -H "Content-Type: application/json" \
@@ -307,6 +320,9 @@ curl -X POST http://127.0.0.1:18795/api/click \
 | `/api/network/clear` | POST | 清理已捕获的网络事件 |
 | `/api/navigate` | POST | 导航已附加标签页 |
 | `/api/snapshot` | GET | 获取页面文本快照或 HTML |
+| `/api/dialog`、`/api/dialog/status` | GET | 读取当前原生 JavaScript 对话框 |
+| `/api/dialog/accept` | POST | 明确接受对话框，可附带 prompt 文本 |
+| `/api/dialog/dismiss` | POST | 明确取消/关闭对话框 |
 | `/api/wait` | POST | 等待 CSS 元素进入 DOM 或变为可见 |
 | `/api/click` | POST | 按 CSS selector 点击元素 |
 | `/api/type` | POST | 输入文本 |
@@ -394,6 +410,7 @@ npm test
 - 默认只监听 `127.0.0.1`,不要把 relay server 暴露到公网。
 - Remote Relay 从不开放端口:浏览器主动出站连公网 Relay 服务,它只在内存里保存 Device ID 的哈希。Device ID 请像密码一样保管;Remote Relay 开着时,拿到它的人就能控制浏览器。
 - Browser Relay 会让 Agent 访问你的真实浏览器状态,因此启用的 Agent 应被视为可信本地软件。
+- 默认绝不自动接受或取消任何原生 JavaScript 对话框，尤其不会自动处理 `confirm`、`prompt` 或 `beforeunload`；必须显式调用 dialog accept/dismiss。
 
 ## License
 
