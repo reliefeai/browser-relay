@@ -90,3 +90,24 @@ test('remote extension executor exposes the same wait contract as the local rela
   assert.match(background, /'tab_not_found'/);
   assert.match(background, /'wait_evaluation_failed'/);
 });
+
+test('popup local-relay switch gates the local connection and can switch it back on', () => {
+  const background = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf-8');
+  const html = readFileSync(new URL('../extension/popup.html', import.meta.url), 'utf-8');
+  const popup = readFileSync(new URL('../extension/popup.js', import.meta.url), 'utf-8');
+
+  assert.match(html, /id="localToggle"/);
+  assert.match(popup, /chrome\.runtime\.sendMessage\(\{ type: 'enableLocalRelay' \}\)/);
+  assert.match(popup, /chrome\.runtime\.sendMessage\(\{ type: 'disableLocalRelay' \}\)/);
+  assert.match(background, /async function getRelayEnabled\s*\(\)\s*{/);
+  assert.match(background, /msg\?\.type === 'enableLocalRelay'/);
+  assert.match(background, /msg\?\.type === 'disableLocalRelay'/);
+  assert.match(background, /chrome\.storage\.local\.set\(\{ relayEnabled: false \}\)/);
+  // Every path that dials out must be gated, or the relay reconnects behind the user's back.
+  assert.match(background, /async function ensureRelayConnection\s*\(\)\s*{\s*if \(!\(await getRelayEnabled\(\)\)\) return/);
+  assert.match(background, /if \(!\(await getRelayEnabled\(\)\)\) return[\s\S]*await ensureRelayConnection\(\)/);
+  assert.match(background, /\(await getRelayEnabled\(\)\) && \(!relayWs \|\| relayWs\.readyState !== WebSocket\.OPEN\)/);
+  assert.match(background, /void getRelayEnabled\(\)\.then\(\(enabled\) => \{ if \(enabled\) scheduleReconnect\(\) \}\)/);
+  // Status must keep reporting the switch so the popup can render it.
+  assert.match(background, /sendResponse\(\{ enabled, connected, connecting, port, attachedCount/);
+});

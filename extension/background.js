@@ -133,6 +133,14 @@ async function getRelayPort() {
   return n
 }
 
+// Local Relay on/off switch (the popup toggle). Only gates the local WebSocket;
+// External Control keeps its own switch. Absent or `true` means enabled, so an
+// existing install that never touched the switch behaves as before.
+async function getRelayEnabled() {
+  const stored = await chrome.storage.local.get(['relayEnabled'])
+  return stored.relayEnabled !== false
+}
+
 async function getIdleDetachMs() {
   const stored = await chrome.storage.local.get(['idleDetachSeconds', IDLE_DETACH_DEFAULT_MIGRATION_KEY])
   const raw = stored.idleDetachSeconds
@@ -226,6 +234,7 @@ async function rehydrateState() {
 }
 
 async function ensureRelayConnection() {
+  if (!(await getRelayEnabled())) return
   if (relayWs && relayWs.readyState === WebSocket.OPEN) return
   if (relayConnectPromise) return await relayConnectPromise
 
@@ -306,7 +315,7 @@ function onRelayClosed(reason) {
       void chrome.action.setTitle({ tabId, title: 'Browser Relay: reconnecting...' })
     }
   }
-  scheduleReconnect()
+  void getRelayEnabled().then((enabled) => { if (enabled) scheduleReconnect() })
 }
 
 function scheduleReconnect() {
@@ -316,6 +325,7 @@ function scheduleReconnect() {
   console.log(`Scheduling reconnect attempt ${reconnectAttempt} in ${delay}ms`)
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null
+    if (!(await getRelayEnabled())) return
     try {
       await ensureRelayConnection()
       reconnectAttempt = 0
@@ -971,7 +981,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   await softDetachIdleTabs()
 
-  if (!relayWs || relayWs.readyState !== WebSocket.OPEN) {
+  if ((await getRelayEnabled()) && (!relayWs || relayWs.readyState !== WebSocket.OPEN)) {
     if (!relayConnectPromise && !reconnectTimer) {
       console.log('Keepalive: WebSocket unhealthy, triggering reconnect')
       try {
@@ -1750,9 +1760,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg?.type === 'getStatus') {
     ;(async () => {
-      const port = await getRelayPort()
-      const connected = relayWs?.readyState === WebSocket.OPEN
-      const connecting = !connected && (
+      const [port, enabled] = await Promise.all([getRelayPort(), getRelayEnabled()])
+      const connected = enabled && relayWs?.readyState === WebSocket.OPEN
+      const connecting = enabled && !connected && (
         relayConnectPromise !== null ||
         relayWs?.readyState === WebSocket.CONNECTING ||
         reconnectTimer !== null
@@ -1761,7 +1771,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       for (const t of tabs.values()) if (t.state === 'connected') attachedCount++
       const manifest = chrome.runtime.getManifest()
       const version = manifest.version_name || manifest.version
-      sendResponse({ connected, connecting, port, attachedCount, lastError: lastConnectError, version })
+      sendResponse({ enabled, connected, connecting, port, attachedCount, lastError: lastConnectError, version })
     })()
     return true
   }
@@ -1770,6 +1780,43 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     ;(async () => {
       await connectOrToggle()
       sendResponse({ ok: true, error: lastConnectError })
+    })()
+    return true
+  }
+
+  // Popup Local Relay switch. Disabling drops the WebSocket and cancels the
+  // reconnect loop; tabs stay attached to Chrome but no client can drive them.
+  if (msg?.type === 'enableLocalRelay') {
+    ;(async () => {
+      await chrome.storage.local.set({ relayEnabled: true })
+      cancelReconnect()
+      await connectOrToggle()
+      sendResponse({
+        ok: true,
+        connected: relayWs?.readyState === WebSocket.OPEN,
+        lastError: lastConnectError,
+      })
+    })()
+    return true
+  }
+
+  if (msg?.type === 'disableLocalRelay') {
+    ;(async () => {
+      await chrome.storage.local.set({ relayEnabled: false })
+      cancelReconnect()
+      const ws = relayWs
+      // Null first so the close handler treats this as intentional: the
+      // onclose listener bails when `ws !== relayWs`.
+      relayWs = null
+      try { ws?.close() } catch {}
+      automation.disconnect('local')
+      endLegacyActivities('local')
+      for (const [id, p] of pending.entries()) {
+        pending.delete(id)
+        p.reject(new Error('Local Relay disabled'))
+      }
+      for (const tabId of tabs.keys()) setBadge(tabId, 'off')
+      sendResponse({ ok: true })
     })()
     return true
   }

@@ -4,6 +4,7 @@ const els = {
   dot: document.getElementById('dot'),
   label: document.getElementById('label'),
   meta: document.getElementById('meta'),
+  localToggle: document.getElementById('localToggle'),
   reconnect: document.getElementById('reconnect'),
   options: document.getElementById('options'),
   install: document.getElementById('install'),
@@ -14,10 +15,17 @@ const els = {
 }
 
 function render(state) {
-  const { connected, connecting, port, attachedCount, lastError, version } = state
+  const { enabled = true, connected, connecting, port, attachedCount, lastError, version } = state
   const host = `127.0.0.1:${port}`
+  if (!els.localToggle.disabled) els.localToggle.checked = enabled
 
-  if (connected) {
+  if (!enabled) {
+    els.dot.className = 'dot off'
+    els.label.textContent = t('popupDisabled')
+    els.meta.textContent = t('popupDisabledMeta')
+    els.install.classList.remove('show')
+    els.reconnect.textContent = t('popupEnable')
+  } else if (connected) {
     els.dot.className = 'dot on'
     els.label.textContent = t('popupConnected')
     els.meta.textContent = `${host} · ${attachedCount} ${t('popupTabsAttached')}`
@@ -62,7 +70,30 @@ async function fetchStatus() {
   }
 }
 
+els.localToggle.addEventListener('change', async () => {
+  els.localToggle.disabled = true
+  try {
+    if (els.localToggle.checked) {
+      els.dot.className = 'dot connecting'
+      els.label.textContent = t('popupConnecting')
+      els.meta.textContent = ''
+      try { await chrome.runtime.sendMessage({ type: 'enableLocalRelay' }) } catch {}
+    } else {
+      try { await chrome.runtime.sendMessage({ type: 'disableLocalRelay' }) } catch {}
+    }
+  } finally {
+    els.localToggle.disabled = false
+  }
+  setTimeout(fetchStatus, 300)
+  setTimeout(fetchStatus, 1500)
+})
+
 els.reconnect.addEventListener('click', async () => {
+  if (!els.localToggle.checked) {
+    els.localToggle.checked = true
+    els.localToggle.dispatchEvent(new Event('change'))
+    return
+  }
   els.dot.className = 'dot connecting'
   els.label.textContent = t('popupConnecting')
   els.meta.textContent = ''

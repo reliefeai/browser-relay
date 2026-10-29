@@ -12,8 +12,15 @@
     .dot.err { background: #ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,0.15); }
     .dot.connecting { background: #f59e0b; animation: pulse 1.2s infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-    .label { font-weight: 600; font-size: 14px; line-height: 1.2; }
-    .meta { font-size: 12px; color: #64748b; margin-top: 3px; }
+    .switch { position: relative; display: inline-flex; cursor: pointer; flex: none; margin-left: auto; }
+    .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+    .switch .track { position: relative; width: 40px; height: 22px; border-radius: 999px; background: #e2e8f0; border: 1px solid #cbd5e1; transition: background .2s ease, border-color .2s ease; }
+    .switch .thumb { position: absolute; left: 2px; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: #94a3b8; transition: transform .2s cubic-bezier(.5,1.6,.5,1), background .2s ease; }
+    .switch input:checked + .track { background: #dcfce7; border-color: #22c55e; }
+    .switch input:checked + .track .thumb { transform: translateX(18px); background: #22c55e; }
+    .switch input:disabled + .track { opacity: .5; }
+    .switch input:focus-visible + .track { box-shadow: 0 0 0 3px rgba(34,197,94,0.25); }
+    .label { font-weight: 600; font-size: 14px; line-height: 1.2; }    .meta { font-size: 12px; color: #64748b; margin-top: 3px; }
     .actions { display: flex; gap: 8px; margin-top: 14px; }
     button { flex: 1; padding: 8px 10px; font-size: 13px; border: 1px solid #e2e8f0; background: white; border-radius: 6px; cursor: pointer; color: #0f172a; font-family: inherit; }
     button.primary { background: #22c55e; color: white; border-color: #22c55e; font-weight: 500; }
@@ -42,6 +49,10 @@
       <div class="label" id="label" data-i18n="popupLoading">Loading…</div>
       <div class="meta" id="meta"></div>
     </div>
+    <label class="switch" title="Turn Local Relay on or off">
+      <input type="checkbox" id="localToggle" aria-label="Local Relay">
+      <span class="track"><span class="thumb"></span></span>
+    </label>
   </div>
 
   <div class="actions">

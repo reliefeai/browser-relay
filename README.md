@@ -96,6 +96,8 @@ browser-relay path
 
 Then open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `extension` directory printed by `browser-relay path`.
 
+The toolbar popup carries a **Local Relay** switch. Turning it off drops the local WebSocket and cancels reconnects, so no CLI or agent can drive this browser until you turn it back on; Remote Relay keeps its own switch on the Options page.
+
 ### 3. Verify the browser connection
 
 Run one complete read-only diagnosis, then list the attached tabs:
