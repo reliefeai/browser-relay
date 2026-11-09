@@ -83,9 +83,14 @@ have partly executed. Inspect them before recovery; never replay a group blindly
 
 ## Foreground, ownership and interruptions
 
-`focus --tab <id> --session <task-name>` explicitly brings the tab/window forward.
-Background pages may defer rendering. Scrolling requires foreground operation;
-use focus or allowFocus only when bringing the page forward fits the user's task.
+Keep the user's current tab and window in front. Read, navigate, fill, click
+semantic targets and scroll in the background by default. Do not call `focus`
+or set `allowFocus:true` just to inspect a page, scroll, or recover from an error.
+Use them only when the user explicitly requests foreground operation or a visual
+demonstration. A browser task by itself does not authorize stealing focus.
+Background scrolling uses DOM scrolling and reports strategy:'dom'. A site may
+defer rendering new content while hidden; inspect the returned state and report
+that limitation instead of automatically bringing it forward.
 Background semantic clicks may use DOM activation, reported as strategy:'dom';
 that does not imply a trusted mouse gesture.
 

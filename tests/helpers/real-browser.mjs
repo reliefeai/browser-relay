@@ -26,6 +26,7 @@ export async function setupBrowser({
   relayLatencyMs = 0,
   viewport = { width: 1280, height: 1000 },
   fixtureFile = "automation.html",
+  nativeVisibility = false,
 } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "browser-relay-e2e-"));
   const ext = join(dir, "extension");
@@ -83,9 +84,15 @@ export async function setupBrowser({
   let relayLog = "";
   relay.stdout.on("data", (b) => (relayLog += b));
   relay.stderr.on("data", (b) => (relayLog += b));
-  let context, fixture;
+  let context, fixture, nativeProcess, nativeBrowser;
   const close = async () => {
-    await context?.close();
+    if (nativeBrowser) await nativeBrowser.close();
+    else await context?.close();
+    if (nativeProcess && nativeProcess.exitCode === null && nativeProcess.signalCode === null) {
+      const exited = new Promise(resolve => nativeProcess.once('exit', resolve));
+      nativeProcess.kill('SIGTERM');
+      await exited;
+    }
     relay.kill("SIGTERM");
     for (const socket of sockets) socket.destroy();
     if (proxy) await new Promise((r) => proxy.close(r));
@@ -108,7 +115,19 @@ export async function setupBrowser({
     });
     await new Promise((r) => fixture.listen(0, r));
     const fixtureUrl = `http://127.0.0.1:${fixture.address().port}/`;
-    context = await chromium.launchPersistentContext(join(dir, "profile"), {
+    if (nativeVisibility) {
+      // Normal Playwright startup forces focus emulation on every page. A
+      // native launch plus noDefaults keeps real background visibility.
+      nativeProcess = spawn(chromium.executablePath(), [
+        `--user-data-dir=${join(dir, 'profile')}`,
+        '--remote-debugging-port=0', '--no-first-run', '--no-default-browser-check',
+        ...(!headed ? ['--headless=new'] : []),
+        `--disable-extensions-except=${ext}`, `--load-extension=${ext}`, 'about:blank',
+      ], { stdio: 'ignore' });
+      const cdpPort = await waitFor(async () => (await readFile(join(dir, 'profile', 'DevToolsActivePort'), 'utf8')).split('\n')[0]);
+      nativeBrowser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`, { noDefaults: true });
+      context = nativeBrowser.contexts()[0];
+    } else context = await chromium.launchPersistentContext(join(dir, "profile"), {
       channel: "chromium",
       headless: !headed,
       viewport,

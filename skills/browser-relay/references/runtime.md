@@ -101,8 +101,8 @@ Without a top-level main it reads the whole document, even if a child frame has 
   verify checked state; background DOM fallback reports `strategy:'dom'` and
   does not imply a trusted mouse event. A radio cannot be directly unchecked.
 - `key`: `key`, e.g. `Enter`, `Escape`, `Control+A`, `Meta+A`, `Shift+Tab`.
-- `scroll`: `target` or numeric `x,y`, plus `deltaX` and/or `deltaY` in pixels. Requires foreground or explicit `allowFocus:true`. `waitForChange:true` waits up to timeoutMs (default 1500) and reports contentChanged. This compares rendered text, not unique record identities. viewportMoved reports page scroll movement, not nested element scroll movement.
-- `focus`: Bring the current tab/window to the foreground.
+- `scroll`: `target` or numeric `x,y`, plus `deltaX` and/or `deltaY` in pixels. Background scrolling uses DOM scrolling without activating the tab, including when an older caller supplies `allowFocus:true`. Coordinate scrolling selects the scrollable container under the point; for an iframe, use an explicit target with frameId. Results identify strategy:'dom' or 'wheel'. `waitForChange:true` waits up to timeoutMs (default 1500) and reports contentChanged. Hidden pages may defer rendering; no observed change is not permission to focus. This compares rendered text, not unique record identities. viewportMoved reports page scroll movement, not nested element scroll movement.
+- `focus`: Bring the current tab/window to the foreground only when the user explicitly requests it. The same requirement applies to `allowFocus:true` on visual actions.
 - `wait`: `target`, state `attached|visible|hidden|detached|enabled`, timeoutMs 1–20000.
 - `navigate`: HTTP(S) `url`, or `about:blank`. Default waitUntil:'interactive' waits for document readiness; waitUntil:'commit' only starts navigation. Neither guarantees site-specific async data is loaded. Add a wait action for the actual result.
 

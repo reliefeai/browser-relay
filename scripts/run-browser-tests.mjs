@@ -9,6 +9,7 @@ const result = spawnSync(
     "tests/browser-parity.test.mjs",
     "tests/browser-review.test.mjs",
     "tests/browser-activity.test.mjs",
+    "tests/browser-background.test.mjs",
   ],
   { stdio: "inherit", env: { ...process.env, BROWSER_RELAY_E2E: "1" } },
 );

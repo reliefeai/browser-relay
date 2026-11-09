@@ -26,7 +26,7 @@
 - 读写会自动认领，其他会话及匿名旧/CDP 客户端不能操作已认领的 tab。租约用于可信客户端间协调，不是抵抗任意本地软件的安全隔离。
 - release/handoff 要求没有未完成工作；保留任务创建标记。stop 取消任务并释放归属，不关闭页面、不撤销已执行动作。弹窗提供用户可见的会话停止入口。
 - 导航默认等文档 readyState 离开 loading；不是“所有网络请求结束”，也不保证站点异步数据已到。需要时追加目标 wait。
-- 滚动需要前台或显式 allowFocus。可选 waitForChange 返回是否观察到文本变化；viewportMoved 与 contentChanged 分开。文本变化不是新记录数量，仍需按链接/业务 ID 去重。
+- 滚动默认保持后台，隐藏标签使用 DOM 滚动，不激活标签或窗口。只有用户明确要求时才调用 focus 或允许视觉动作前置。可选 waitForChange 返回是否观察到文本变化；后台可能延迟渲染，不能因此自行切前台。viewportMoved 与 contentChanged 分开，文本变化不是新记录数量，仍需按链接/业务 ID 去重。
 - 失败任务保留 results、completedActions 和 interruptedAction。取消会补发本任务尚未释放的按键/鼠标释放事件，不重放按下动作。取消不能保证已发出的动作未产生效果。
 - 持久脚本的拒绝型 top-level await 错误即时返回结构化错误并保留绑定；超时重置返回 session/task IDs，便于查询部分进展。MCP notifications/cancelled 可取消普通调用与脚本运行。
 

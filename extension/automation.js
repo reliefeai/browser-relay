@@ -100,6 +100,31 @@ const NODE_FUNCTION = `function(operation, args) {
   }
 }`;
 
+// A hidden tab can scroll its DOM without activating the Chrome tab/window.
+// Resolve the container under the pointer so nested panels keep their meaning.
+function scrollAtPoint({ x, y, deltaX = 0, deltaY = 0 }) {
+  let element = document.elementFromPoint(x, y);
+  while (element?.shadowRoot) {
+    const inner = element.shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner === element) break;
+    element = inner;
+  }
+  if (element?.matches('iframe, frame'))
+    return { error: 'frame_target_required' };
+  const root = document.scrollingElement;
+  for (let node = element; node && node !== root; node = node.parentElement || node.getRootNode().host) {
+    const style = getComputedStyle(node);
+    const scrollY = deltaY && node.scrollHeight > node.clientHeight && /auto|scroll|overlay/.test(style.overflowY);
+    const scrollX = deltaX && node.scrollWidth > node.clientWidth && /auto|scroll|overlay/.test(style.overflowX);
+    if (scrollX || scrollY) {
+      node.scrollBy({ left: deltaX, top: deltaY, behavior: 'instant' });
+      return { scrollLeft: node.scrollLeft, scrollTop: node.scrollTop };
+    }
+  }
+  window.scrollBy({ left: deltaX, top: deltaY, behavior: 'instant' });
+  return { scrollLeft: window.scrollX, scrollTop: window.scrollY };
+}
+
 /** Browser-side executor. Local HTTP and remote hub both reach this instance. */
 export function createAutomation({
   send,
@@ -934,7 +959,7 @@ export function createAutomation({
     shots.set(screenshotId, { ...shot, data: undefined });
     return shot;
   }
-  async function point(tabId, action) {
+  async function point(tabId, action, { allowBackground = false } = {}) {
     let { x, y } = action;
     if (!Number.isFinite(x) || !Number.isFinite(y))
       fail("invalid_coordinates", "Finite x and y are required");
@@ -963,12 +988,12 @@ export function createAutomation({
         "invalid_coordinates",
         "Point is outside current viewport; scroll first",
       );
-    if (meta.background) {
+    if (meta.background && !allowBackground) {
       if (action.allowFocus && focusTab) await focusTab(tabId);
       else
         fail(
           "needs_foreground",
-          "Visual input requires a visible tab; allowFocus explicitly or use a semantic target",
+          "Visual input requires a visible tab; use a semantic target in the background. Only focus when the user has requested foreground operation",
           409,
         );
     }
@@ -1202,18 +1227,7 @@ export function createAutomation({
         );
     }
     if (type === "scroll") {
-      let before = await evaluate(tabId, metadataExpression);
-      if (before.background) {
-        if (!action.allowFocus)
-          fail(
-            "needs_foreground",
-            "Background pages can defer feed rendering; use focus or allowFocus:true before scrolling",
-            409,
-          );
-        await focusTab(tabId);
-        await awaitPaint(tabId);
-        before = await evaluate(tabId, metadataExpression);
-      }
+      const before = await evaluate(tabId, metadataExpression);
       const beforeText = action.waitForChange
         ? await evaluate(
             tabId,
@@ -1221,8 +1235,14 @@ export function createAutomation({
           )
         : undefined;
       if (node) await nodeCall(tabId, node, "scroll", action);
-      else {
-        const at = await point(tabId, action);
+      else if (before.background) {
+        const at = await point(tabId, action, { allowBackground: true });
+        const result = await evaluate(tabId, `(${scrollAtPoint.toString()})(${JSON.stringify({ ...at, deltaX: action.deltaX || 0, deltaY: action.deltaY || 0 })})`);
+        if (result?.error)
+          fail(result.error, "Use a target with frameId to scroll inside a background iframe", 409);
+      } else {
+        // The user may switch tabs during preparation; never reactivate it.
+        const at = await point(tabId, { ...action, allowFocus: false });
         await cdp(tabId, "Input.dispatchMouseEvent", {
           type: "mouseWheel",
           x: at.x,
@@ -1248,6 +1268,7 @@ export function createAutomation({
       const after = await evaluate(tabId, metadataExpression);
       return {
         scrolled: true,
+        strategy: node || before.background ? "dom" : "wheel",
         viewportMoved:
           before.viewport.scrollY !== after.viewport.scrollY ||
           before.viewport.scrollX !== after.viewport.scrollX,
@@ -1255,7 +1276,9 @@ export function createAutomation({
         ...(contentChanged === false
           ? {
               warning:
-                "No text change observed; the feed may be unchanged or at its end. Do not count this as new content.",
+                before.background
+                  ? "No text change observed; background rendering may be deferred or the feed may be at its end. Do not count this as new content."
+                  : "No text change observed; the feed may be unchanged or at its end. Do not count this as new content.",
             }
           : {}),
       };

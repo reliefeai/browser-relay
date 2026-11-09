@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Browser Relay",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "Let AI agents share your everyday Chrome locally or across multiple machines.",
   "icons": {
     "16": "icons/icon16.png",
@@ -42,5 +42,5 @@
     "page": "options.html",
     "open_in_tab": true
   },
-  "version_name": "1.5.3"
+  "version_name": "1.5.4"
 }

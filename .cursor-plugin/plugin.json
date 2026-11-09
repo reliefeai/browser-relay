@@ -1,7 +1,7 @@
 {
   "name": "browser-relay",
   "displayName": "Browser Relay",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "Let agents use the Chrome you already have open and logged in through a Skill + CLI, locally or across machines.",
   "author": {
     "name": "reliefeai",
